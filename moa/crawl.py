@@ -294,6 +294,20 @@ def post_links(html: str, base: str, selector: str = '') -> list[dict]:
     return out[:50]
 
 
+FILE_TOKEN = re.compile(r'[^\s/\\:*?"<>|]{1,120}\.(?:pdf|hwpx?|docx?|xlsx?|pptx?|png|jpe?g|webp|zip|txt)', re.I)
+
+
+def attachment_name(label: str, url: str) -> str:
+    """Prefer the real file name in the link text, else the name in the URL path."""
+    match = FILE_TOKEN.search(label)
+    if match:
+        return match.group(0)
+    name = urlsplit(url).path.rsplit('/', 1)[-1]
+    if EXT.search(name):
+        return name
+    return (label.strip() or name or 'attachment')
+
+
 def detail(html: str, base: str, fallback_title: str, body_selector: str = '') -> dict:
     soup = BeautifulSoup(html,'html.parser')
     if soup.select_one('input[type="password"]') or any(s in soup.get_text() for s in ('로그인이 필요합니다','접근 권한이 없습니다','자동입력 방지문자')):

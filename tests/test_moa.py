@@ -505,6 +505,30 @@ def test_every_failed_school_is_reported(tmp_path,monkeypatch):
         assert stats['error_count']==25 and len(stats['errors'])==25
 
 
+def test_status_reports_today_dedup_and_review_state(tmp_path,capsys):
+    from moa.app import cli
+    from moa.core import Store
+    from moa.learn import learn
+    with Store(tmp_path) as store:
+        asset=store.object(b'x','a.pdf')
+        ident,_=store.save_notice(school(),'https://example.org/1','안내',
+                                  '<table><tr><td>장소</td><td>운동장</td></tr></table>',[asset],
+                                  datetime.now().date().isoformat())
+        learn(store,ident)
+    assert cli(['--data',str(tmp_path),'status'])==0
+    out=json.loads(capsys.readouterr().out)
+    assert out['documents']==1 and out['documents_today']==1
+    assert out['unique_objects_on_disk']==1 and out['sightings']==1
+    assert out['table_cases']==1 and out['review_pending_cases']==1 and out['approved']==0
+
+
+def test_attachment_name_prefers_real_file_name():
+    from moa.crawl import attachment_name
+    assert attachment_name('다운로드 : 7회) 안내문.pdf','https://x/y/download.do?file=1')=='안내문.pdf'
+    assert attachment_name('다운로드 : 7회)','https://x/y/guide.pdf')=='guide.pdf'
+    assert attachment_name('다운로드','https://x/y/download.do?fileSid=9')=='다운로드'
+
+
 def test_error_run_is_retried_but_complete_is_not(tmp_path):
     """A transient error must not consume the whole day, while a finished day is never repeated."""
     from moa.core import Store
