@@ -1,0 +1,36 @@
+services:
+  collector:
+    build: .
+    image: moa-notice-collector:local
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      MOA_DATA_DIR: /data
+      TZ: Asia/Seoul
+    user: "${MOA_UID:-10001}:${MOA_GID:-10001}"
+    volumes:
+      - type: bind
+        source: ${NAS_DATA_DIR:-/volume2/moa/data}
+        target: /data
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    pids_limit: 96
+    stop_grace_period: 65s
+    healthcheck:
+      test: [CMD, python, -m, moa, health]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
