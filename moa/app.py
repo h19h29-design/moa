@@ -314,8 +314,16 @@ def cli(argv=None) -> int:
                 print(f'{len(result)}개 학교 홈페이지 동기화')
             elif args.command=='status':
                 last=store.db.execute('SELECT day,status,finished FROM runs ORDER BY id DESC LIMIT 1').fetchone()
-                print(json.dumps({'documents':store.db.execute('SELECT count(*) FROM notices').fetchone()[0],
+                today=kst_now().date().isoformat()
+                print(json.dumps({
+                  'documents':store.db.execute('SELECT count(*) FROM notices').fetchone()[0],
+                  'documents_today':store.db.execute('SELECT count(*) FROM notices WHERE day=?',(today,)).fetchone()[0],
+                  'regions_today':{row['office']:row['n'] for row in store.db.execute(
+                      'SELECT office,count(*) AS n FROM notices WHERE day=? GROUP BY office ORDER BY office',(today,))},
+                  'unique_objects_on_disk':sum(1 for _ in (root/'objects').glob('*/*')),
+                  'sightings':store.db.execute('SELECT count(*) FROM sightings').fetchone()[0],
                   'table_cases':store.db.execute('SELECT count(*) FROM cases').fetchone()[0],
+                  'review_pending_cases':store.db.execute('SELECT count(*) FROM cases WHERE approved=0').fetchone()[0],
                   'approved':store.db.execute('SELECT count(*) FROM cases WHERE approved=1').fetchone()[0],
                   'analysis':{r[0]:r[1] for r in store.db.execute('SELECT analysis_status,count(*) FROM notices GROUP BY analysis_status')},
                   'last_run':dict(last) if last else None},ensure_ascii=False,indent=2))
