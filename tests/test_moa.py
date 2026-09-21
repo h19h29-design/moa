@@ -505,6 +505,51 @@ def test_every_failed_school_is_reported(tmp_path,monkeypatch):
         assert stats['error_count']==25 and len(stats['errors'])==25
 
 
+def test_fetcher_retries_transient_connection_error(monkeypatch):
+    """School servers often reset the first connection; one retry must not fail the school."""
+    import urllib3
+    from moa import net
+    from moa.net import Fetcher
+    state={'n':0}
+    class FakeResponse:
+        status=200
+        headers={'Content-Type':'text/plain'}
+        def stream(self,*a,**k):
+            yield b'ok'
+        def close(self): pass
+    class FakePool:
+        def __init__(self,*a,**k): pass
+        def urlopen(self,*a,**k):
+            state['n']+=1
+            if state['n']==1:
+                raise urllib3.exceptions.ProtocolError('Connection aborted.')
+            return FakeResponse()
+        def close(self): pass
+    monkeypatch.setattr(net.urllib3,'HTTPSConnectionPool',FakePool)
+    monkeypatch.setattr(net,'public_addresses',lambda host,port:['93.184.216.34'])
+    monkeypatch.setattr(net.time,'sleep',lambda *_: None)
+    response=Fetcher(delay=1.0)._one('https://example.org/x',1024)
+    assert response.status==200 and state['n']==2
+
+
+def test_jsessionid_path_parameter_is_dropped():
+    from moa.net import canonical_url
+    assert canonical_url('https://s.dge.es.kr/dgdowone/main.do;jsessionid=ABC?sysId=x')==\
+        'https://s.dge.es.kr/dgdowone/main.do?sysId=x'
+
+
+def test_dext5_uploader_attachment_is_read_from_script():
+    """Gyeonggi goe*.kr posts render the body in JS but name the real file in the uploader call."""
+    from moa.crawl import detail
+    html=('<div class="bbs_ViewA"><h3>2026년 2차 학교폭력 실태조사 안내</h3></div>'
+          "<script>DEXT5UPLOAD.AddUploadedFile('k1', '안내 가정통신문.pdf', "
+          "'/upload/jisan-m/na/bbs_4908/2026/09/579a858e.pdf', '81386', 'k1', G_UploadID);</script>")
+    d=detail(html,'https://jisan-m.goepj.kr/jisan-m/na/ntt/selectNttInfo.do?bbsId=4908','제목')
+    assert d['title']=='2026년 2차 학교폭력 실태조사 안내'
+    assert d['attachments']==[{'url':'https://jisan-m.goepj.kr/upload/jisan-m/na/bbs_4908/2026/09/579a858e.pdf',
+                               'filename':'안내 가정통신문.pdf'}]
+
+
 def test_status_reports_today_dedup_and_review_state(tmp_path,capsys):
     from moa.app import cli
     from moa.core import Store

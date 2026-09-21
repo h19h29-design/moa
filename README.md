@@ -245,7 +245,7 @@ python -m compileall -q moa
 sh -n scripts/install-nas.sh
 ```
 
-검증: **45개 테스트 통과** (2026-09-21 NAS 실측 반영분 포함). 세부 범위와 남은 한계는
+검증: **48개 테스트 통과** (2026-09-21 NAS 실측 반영분 포함). 세부 범위와 남은 한계는
 `docs/VERIFICATION.md`에 있습니다.
 GitHub Actions 설정은 푸시·PR 시 같은 테스트를 실행하도록 제공됩니다.
 
@@ -267,6 +267,7 @@ GitHub Actions 설정은 푸시·PR 시 같은 테스트를 실행하도록 제�
 | `school.gyo6.net` robots `Disallow: /` | 경북 936교 중 917교 | 수집 제외 |
 | `school.jbedu.kr` robots `/_cmm/fileDownload/*` 차단 | 전북 첨부 | 본문만 저장, 첨부는 `attachments_skipped_robots`로 기록 |
 | `school.use.go.kr` robots `/files/` 차단 | 울산 본문 이미지 | 위와 동일 |
+| `*.djsch.kr` robots `Disallow: /boardCnts/` | 대전 게시판 경로 | 수집 제외(우회하지 않음) |
 | 광주 `xhomenews/xboard` 게시판 로그인 요구 | 광주 일부 | 우회하지 않고 `로그인/인증이 필요한 게시판`으로 기록 |
 | 세종 `*.sjedums.kr` TLS 체인 미완성 | 세종 | 인증서 검증을 끄지 않고 실패로 기록 |
 | 일부 school 홈페이지 DNS 소멸/방화벽 차단 | 개별 학교 | 실패 사유 그대로 기록 |

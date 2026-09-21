@@ -36,7 +36,10 @@ def canonical_url(url: str) -> str:
         host += ':' + str(p.port)
     q = [(k,v) for k,v in parse_qsl(p.query, keep_blank_values=True)
          if not k.lower().startswith('utm_') and k.lower() not in ('fbclid','gclid')]
-    return urlunsplit((p.scheme, host, p.path or '/', urlencode(sorted(q)), ''))
+    # Drop legacy Java path parameters such as ";jsessionid=...". Some office firewalls treat
+    # those URLs as an attack pattern, and a public GET does not need a server session id.
+    path = (p.path or '/').split(';', 1)[0] or '/'
+    return urlunsplit((p.scheme, host, path, urlencode(sorted(q)), ''))
 
 
 def public_addresses(host: str, port: int) -> list[str]:
@@ -76,39 +79,57 @@ class Fetcher:
             raise RuntimeError('일일 HTTP 요청 상한에 도달했습니다.')
         p = urlsplit(url)
         host, port = p.hostname, p.port or (443 if p.scheme == 'https' else 80)
-        if self.cooldowns.get(host, 0) > time.monotonic():
+        # Many schools share one hosting server (same IP, different sub-domains). Pacing per
+        # server keeps us polite to that server's own rate limit instead of per host name.
+        pace = host
+        try:
+            pace = public_addresses(host, port)[0]  # Pin verified IP; no second DNS lookup / proxy env.
+        except ValueError:
+            raise
+        if max(self.cooldowns.get(host, 0), self.cooldowns.get(pace, 0)) > time.monotonic():
             raise RuntimeError('요청 제한 응답으로 해당 호스트를 일시 중지했습니다.')
-        ip = public_addresses(host, port)[0]  # Pin verified IP; no second DNS lookup / proxy env.
-        wait = max(self.delay, self.delays.get(host, 0)) - (time.monotonic() - self.last.get(host, 0))
+        ip = pace
+        wait = max(self.delay, self.delays.get(host, 0)) - (time.monotonic() - self.last.get(pace, 0))
         if wait > 120:
             raise RuntimeError('사이트 요청 간격이 길어 이번 수집에서 제외합니다.')
         if wait > 0:
             time.sleep(wait)
-        self.last[host] = time.monotonic()
+        self.last[pace] = time.monotonic()
         self.requests += 1
         kw = dict(port=port, timeout=urllib3.Timeout(connect=8, read=20), maxsize=1)
-        pool = (urllib3.HTTPSConnectionPool(ip, server_hostname=host, assert_hostname=host,
-                    cert_reqs='CERT_REQUIRED', ca_certs=certifi.where(), **kw)
-                if p.scheme == 'https' else urllib3.HTTPConnectionPool(ip, **kw))
-        response = None
-        try:
-            response = pool.urlopen('GET', urlunsplit(('', '', p.path or '/', p.query, '')),
-                headers={'Host': p.netloc, 'User-Agent': AGENT, 'Accept-Encoding': 'identity'},
-                redirect=False, retries=False, preload_content=False)
-            chunks, size = [], 0
-            started = time.monotonic()
-            for chunk in response.stream(65536, decode_content=True):
-                size += len(chunk)
-                if size > limit or time.monotonic() - started > 60:
-                    raise ValueError('응답 크기/다운로드 시간 제한 초과')
-                chunks.append(chunk)
-            if response.status == 429:
-                self.cooldowns[host] = time.monotonic() + 3600
-            return Response(url, response.status, {k.lower():v for k,v in response.headers.items()}, b''.join(chunks))
-        finally:
-            if response:
-                response.close()
-            pool.close()
+        # School servers routinely drop the first connection (reset/timeout). Two extra attempts
+        # with a short backoff keep a whole school from being written off as failed.
+        for attempt in range(3):
+            if attempt:
+                self.requests += 1
+                time.sleep(2.0 * attempt)
+            pool = (urllib3.HTTPSConnectionPool(ip, server_hostname=host, assert_hostname=host,
+                        cert_reqs='CERT_REQUIRED', ca_certs=certifi.where(), **kw)
+                    if p.scheme == 'https' else urllib3.HTTPConnectionPool(ip, **kw))
+            response = None
+            try:
+                response = pool.urlopen('GET', urlunsplit(('', '', p.path or '/', p.query, '')),
+                    headers={'Host': p.netloc, 'User-Agent': AGENT, 'Accept-Encoding': 'identity'},
+                    redirect=False, retries=False, preload_content=False)
+                chunks, size = [], 0
+                started = time.monotonic()
+                for chunk in response.stream(65536, decode_content=True):
+                    size += len(chunk)
+                    if size > limit or time.monotonic() - started > 60:
+                        raise ValueError('응답 크기/다운로드 시간 제한 초과')
+                    chunks.append(chunk)
+                if response.status == 429:
+                    self.cooldowns[host] = time.monotonic() + 3600
+                    self.cooldowns[pace] = self.cooldowns[host]
+                return Response(url, response.status, {k.lower():v for k,v in response.headers.items()}, b''.join(chunks))
+            except urllib3.exceptions.HTTPError:
+                if attempt == 2:
+                    raise
+            finally:
+                if response:
+                    response.close()
+                pool.close()
+        raise RuntimeError('HTTP 연결 실패')
 
     def _raw(self, url: str, limit: int, allowed_hosts: set[str]) -> Response:
         for _ in range(6):
@@ -126,7 +147,15 @@ class Fetcher:
         p = urlsplit(url)
         origin = p.scheme + '://' + p.netloc
         if origin not in self.rules:
-            r = self._raw(origin + '/robots.txt', 512 * 1024, hosts)
+            try:
+                r = self._raw(origin + '/robots.txt', 512 * 1024, hosts)
+            except urllib3.exceptions.HTTPError:
+                # Legacy http origins are often half-retired: the plain-http robots request is
+                # reset while the https one answers. Ask the https origin instead, and keep
+                # failing closed if that also fails.
+                if p.scheme != 'http':
+                    raise
+                r = self._raw('https://' + p.netloc + '/robots.txt', 512 * 1024, hosts)
             rp = RobotFileParser()
             if r.status in (404,410):
                 rp.parse(['User-agent: *', 'Disallow:'])

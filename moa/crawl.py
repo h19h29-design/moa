@@ -26,10 +26,14 @@ BODY_SELECTORS = ('#nttCn', '.nttCn', '.bbs_view_cont', '.bbs_view_con', '.view_
                   '.bbsContent', '.view-content', '.board-view-body', '.bbs_view_body',
                   'td.tch-ctnt', '.tch-ctnt', '.usm-editor-view', '.usm-content-body-id',
                   '.bbs_view_cont_wrap', '.view_cont_wrap', '#content_body',
-                  '.viewBox', '.cntBody', '.board-text', 'article')
+                  '.viewBox', '.cntBody', '.board-text',
+                  '.subContent_body', '.subContent', '.subCntBody', 'article')
 TITLE_SELECTORS = ('.nttTitle', '.bbs_view_tit', '.bbs_view_title', '.view_title', '.board_view_title',
                    '.subject', 'th.tch-tit', '.tch-tit', '.bbs_view_tit_wrap', 'h1.tit', '.viewBox h1',
-                   'h1.title', 'h2.title')
+                   '.bbs_ViewA h3', '.bbsView h3', 'h1.title', 'h2.title')
+# DEXT5 uploader (Gyeonggi goe*.kr and other Jinhak builds): the attachment list lives in a JS call
+# with the original file name and the real file path, so it is readable without running scripts.
+DEXT5_UPLOAD = re.compile(r"AddUploadedFile\(\s*'[^']*'\s*,\s*'([^']{1,240})'\s*,\s*'([^']{1,400})'", re.I)
 # Small shell pages such as <script>location.href='/main.do'</script> are the norm on school sites.
 JS_TARGET = re.compile(r'''(?:location\s*\.\s*(?:href|replace)\s*(?:=\s*|\()|(?:document|window)\s*\.\s*location(?:\s*\.\s*href)?\s*=\s*|location\s*=\s*)["']([^"']{1,300})["']''', re.I)
 META_TARGET = re.compile(r'''<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["'][^;"']*;\s*url=([^"'\s>]+)''', re.I)
@@ -335,6 +339,16 @@ def detail(html: str, base: str, fallback_title: str, body_selector: str = '') -
         node = soup.select_one(selector)
         if node:
             break
+    for match in DEXT5_UPLOAD.finditer(html):
+        try:
+            url = canonical_url(urljoin(base, match.group(2)))
+        except ValueError:
+            continue
+        if url not in used:
+            used.add(url)
+            # The uploader call carries the original file name verbatim (spaces included).
+            name = match.group(1).strip() or attachment_name('', url)
+            attachments.append({'url': url, 'filename': name[:240] or 'attachment'})
     if node:
         for unwanted in node.select('script,style,form,iframe,object,embed,nav,button'):
             unwanted.decompose()
