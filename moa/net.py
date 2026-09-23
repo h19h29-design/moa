@@ -65,9 +65,10 @@ class Response:
 
 
 class Fetcher:
-    def __init__(self, delay: float = 2.0, max_requests: int = 5000):
+    def __init__(self, delay: float = 2.0, max_requests: int = 5000, meter=None):
         self.delay = max(1.0, delay)
         self.max_requests = max_requests
+        self.meter = meter  # optional shared Budget; spend(1) raises when the daily cap is hit
         self.requests = 0
         self.last: dict[str, float] = {}
         self.rules: dict[str, RobotFileParser] = {}
@@ -96,12 +97,16 @@ class Fetcher:
             time.sleep(wait)
         self.last[pace] = time.monotonic()
         self.requests += 1
+        if self.meter:
+            self.meter.spend(1)
         kw = dict(port=port, timeout=urllib3.Timeout(connect=8, read=20), maxsize=1)
         # School servers routinely drop the first connection (reset/timeout). Two extra attempts
         # with a short backoff keep a whole school from being written off as failed.
         for attempt in range(3):
             if attempt:
                 self.requests += 1
+                if self.meter:
+                    self.meter.spend(1)
                 time.sleep(2.0 * attempt)
             pool = (urllib3.HTTPSConnectionPool(ip, server_hostname=host, assert_hostname=host,
                         cert_reqs='CERT_REQUIRED', ca_certs=certifi.where(), **kw)

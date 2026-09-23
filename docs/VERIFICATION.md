@@ -1,3 +1,38 @@
+# 검증 기록 — 2026-09-23 (2단계)
+
+## 실행 결과
+- `python -m pytest -q`: 62 passed (1단계 48 + 2단계 14)
+- 대상: Synology DS925-Home, 컨테이너 `app-collector-1` healthy
+
+## 2단계로 검증된 항목
+- 스키마 v0→v2 자동 마이그레이션 + 사전 온라인 백업(`db/backups/`, `db/moa-pre-v2-manual.sqlite3`)
+- 서울/경기/기타 3단 목표(50/50/20, 합계 400), V10 제외, 경기 전용 목표 독립
+- 백필 캠페인 생성·학교당 상한(캠페인 10/일 2)·페이지 커서 체크포인트·중단 후 이어하기
+- 백필/증분 실적 분리(`campaign_id`), SHA-256 객체 중복 방지 공유
+- 목록 페이지네이션(pageIndex/page/goPage 류), 반복 페이지·전면 구간 종료
+- 분석 영속 큐(jobs): enqueue→claim→done/error, stale 재큐, 파서 버전별 재분석
+- table_state(table_present/no_table/unknown), 미분석 HWP/이미지를 no_table로 오기하지 않음
+- 양식 family(헤더 의미·역할·병합·단위), 같은 크기 다른 의미 표는 다른 family
+- 우선검수 큐(신규 양식→사례 부족→위험→부족 지역), review 승인/반려/보류/승인취소·이력
+- 평가 그룹 분리: eval split은 검색·추천·approved.jsonl에서 제외, eval.jsonl 별도
+- 일일 요청 예산을 usage 테이블로 프로세스 간 공유
+- 학교 실패 원인 캐시(robots 7일·로그인 30일·dns/tls 1일·게시판 없음 7일)
+
+## NAS 실측 (2026-09-23)
+- 배포 후 자동 마이그레이션 확인, 기존 165건·승인 기록 보존
+- 백필 캠페인 #1 생성(창: 2024-09-23~2026-09-23), 스케줄러 자동 배치로 실수집 확인
+- 실수집 예: 부산/대구 학교 게시판에서 게시일·첨부·campaign_id 기록, partial_capture 구분
+- 분석 큐 168건 처리 완료, 우선검수 큐 실데이터 생성 확인
+- 외부 AI 호출 0건(기능 없음), 비용 0
+
+## 아직 미검증
+- 400건/일 목표의 실제 달성 여부(robots 차단 지역은 물리적으로 불가할 수 있음)
+- 10,000건 도달 — 후보 소진 시 coverage_exhausted로 멈춤
+- HWP(구형)·스캔 PDF·이미지의 표 추출(needs_parser/needs_vision으로만 분류)
+- 사람 검수 UI 없음 — CLI `review`/`review-queue`만 제공
+
+---
+
 # 검증 기록 — 2026-09-21
 
 ## 실행 결과

@@ -298,6 +298,57 @@ def post_links(html: str, base: str, selector: str = '') -> list[dict]:
     return out[:50]
 
 
+PAGE_PARAMS = ('pageIndex', 'page', 'pageNo', 'cpage', 'pageNum', 'page_num', 'PageNo', 'page_no')
+# Common Korean CMS paging handlers: fn_egov_link_page(2), goPage('2'), linkPage(2) ...
+PAGE_CALL = re.compile(
+    r'(?:fn_egov_link_page|fn_egov_link_page|goPage|linkPage|fnLinkPage|pageClick|fn_paging'
+    r'|movePage|fnPage|listPage|goList|fn_selectList|fnSearch|pageMove|go_page|fn_page)'
+    r'''\s*\(\s*['"]?(\d{1,4})''', re.I)
+
+
+def _page_param(url: str) -> str:
+    query = dict(parse_qsl(urlsplit(url).query))
+    for name in PAGE_PARAMS:
+        if name in query:
+            return name
+    path = urlsplit(url).path
+    if 'selectNttList' in path or 'selectBBS' in path or 'bbsList' in path:
+        return 'pageIndex'
+    return 'page'
+
+
+def current_page(url: str) -> int:
+    query = dict(parse_qsl(urlsplit(url).query))
+    for name in PAGE_PARAMS:
+        if name in query and query[name].isdigit():
+            return int(query[name])
+    return 1
+
+
+def next_page_url(html: str, base: str) -> str | None:
+    """URL of the following list page, or None when the board has no paging left."""
+    p = urlsplit(base)
+    query = dict(parse_qsl(p.query))
+    param = _page_param(base)
+    target = current_page(base) + 1
+    soup = BeautifulSoup(html, 'html.parser')
+    for a in soup.select('a'):
+        url = _href(a, base)
+        if not url:
+            continue
+        aq = dict(parse_qsl(urlsplit(url).query))
+        for name in PAGE_PARAMS:
+            if aq.get(name, '').isdigit() and int(aq[name]) == target:
+                return url
+    for a in soup.select('a'):
+        action = (a.get('onclick', '') or '') + ' ' + (a.get('href', '') or '')
+        match = PAGE_CALL.search(action)
+        if match and int(match.group(1)) == target:
+            merged = {**query, param: str(target)}
+            return canonical_url(urlunsplit((p.scheme, p.netloc, p.path, urlencode(merged), '')))
+    return None
+
+
 FILE_TOKEN = re.compile(r'[^\s/\\:*?"<>|]{1,120}\.(?:pdf|hwpx?|docx?|xlsx?|pptx?|png|jpe?g|webp|zip|txt)', re.I)
 
 
@@ -370,12 +421,14 @@ def detail(html: str, base: str, fallback_title: str, body_selector: str = '') -
     return {'title':title, 'body_html':body, 'attachments':attachments}
 
 
-def discover(fetcher, school: dict, override: dict, cached: str | None = None) -> tuple[list[dict],set[str]]:
+def find_boards(fetcher, school: dict, override: dict, cached: str | None = None,
+                known: list[str] | None = None) -> tuple[list[str], set[str]]:
+    """Locate the school's notice-board list URL(s); post listing is a separate step."""
     home = canonical_url(school['home_url'])
     host = urlsplit(home).hostname
     hosts = {host, host[4:] if host.startswith('www.') else 'www.'+host}
     hosts.update(override.get('allowed_hosts',[]))
-    boards = override.get('board_urls',[]) or ([cached] if cached else [])
+    boards = list(override.get('board_urls',[]) or known or ([cached] if cached else []))
     if not boards:
         pages, hosts = resolve_site(fetcher, home, hosts)
         for page in pages:
@@ -390,21 +443,31 @@ def discover(fetcher, school: dict, override: dict, cached: str | None = None) -
                     break
     if not boards:
         raise ValueError('가정통신문 게시판 링크를 찾지 못했습니다.')
+    return list(dict.fromkeys(boards)), hosts
+
+
+def board_posts(fetcher, board_url: str, hosts: set[str], selector: str = '') -> list[dict]:
+    """Posts on the first list page of one board (incremental collection uses this)."""
+    pages, _ = open_pages(fetcher, board_url, hosts)
+    page = pages[-1]
+    found = post_links(page.text, page.url, selector)
+    if not found and login_required(page.text):
+        raise ValueError('로그인/인증이 필요한 게시판: 우회하지 않습니다.')
+    for post in found:
+        post['board_url'] = page.url
+    return found
+
+
+def discover(fetcher, school: dict, override: dict, cached: str | None = None) -> tuple[list[dict],set[str]]:
+    boards, hosts = find_boards(fetcher, school, override, cached)
     posts=[]
     last_error=None
     for url in dict.fromkeys(boards):
         try:
-            pages,_=open_pages(fetcher,url,hosts)
+            found = board_posts(fetcher, url, hosts, override.get('post_selector',''))
         except (ValueError,RuntimeError,PermissionError) as exc:
             last_error=exc
             continue
-        page=pages[-1]
-        found=post_links(page.text,page.url,override.get('post_selector',''))
-        if not found and login_required(page.text):
-            last_error=ValueError('로그인/인증이 필요한 게시판: 우회하지 않습니다.')
-            continue
-        for post in found:
-            post['board_url']=page.url
         posts.extend(found)
         if posts:
             break

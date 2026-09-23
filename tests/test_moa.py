@@ -14,8 +14,10 @@ def school(code='B10', n='1'):
 
 def test_quota_and_korean_date():
     from moa.core import quota, kst_now
-    assert quota('B10', '서울특별시교육청') == 10
-    assert quota('NEW', '새교육청') == 5
+    assert quota('B10', '서울특별시교육청') == 50
+    assert quota('J10', '경기도교육청') == 50
+    assert quota('C10', '부산광역시교육청') == 20
+    assert quota('NEW', '새교육청') == 20
     assert kst_now().utcoffset().total_seconds() == 32400
 
 
@@ -180,11 +182,11 @@ def test_pipeline_hits_quota_rerun_does_not_overcollect(tmp_path,monkeypatch):
     rows,pages=pipeline_fixture()
     net=FakeNetwork(pages)
     with Store(tmp_path) as store:
-        r=collect(store,net,rows,'2026-09-21')
+        r=collect(store,net,rows,'2026-09-21',seoul_target=10)
         assert r['status']=='complete' and r['regions']['B10']['new']==10
         assert r['case_count']==10 and r['approved_count']==0
         requests=net.requests
-        r=collect(store,net,rows,'2026-09-21')
+        r=collect(store,net,rows,'2026-09-21',seoul_target=10)
         assert r['regions']['B10']['new']==0 and net.requests==requests
 
 
@@ -198,7 +200,7 @@ def test_pipeline_other_office_and_missing_attachment(tmp_path,monkeypatch):
         pages[url]+='<a href="/missing.pdf">안내.pdf</a>'
     monkeypatch.setenv('MIN_FREE_MB','100')
     with Store(tmp_path) as store:
-        r=collect(store,FakeNetwork(pages),rows,'2026-09-21')
+        r=collect(store,FakeNetwork(pages),rows,'2026-09-21',other_target=5)
         stats=r['regions']['C10']
         assert stats['target']==5 and stats['new']==5 and stats['shortfall']==0
         assert r['status']=='complete'
@@ -488,7 +490,7 @@ def test_overseas_office_excluded_from_daily_target(tmp_path,monkeypatch):
     with Store(tmp_path) as store:
         report=collect(store,FakeNetwork(pages),rows,'2026-09-21')
         assert 'V10' not in report['regions'] and report['excluded_offices']==['V10']
-        assert report['daily_target_total']==10
+        assert report['daily_target_total']==50
 
 
 def test_every_failed_school_is_reported(tmp_path,monkeypatch):
@@ -643,3 +645,255 @@ def test_neis_paging_finishes_on_record_count_with_duplicate_codes(tmp_path):
     saved=json.loads((tmp_path/'registry/schools.json').read_text())
     assert saved['total_records']==1000 and saved['unique_schools']==991
     assert len(saved['offices'])==17
+
+
+# ---------- Phase 2: targets, backfill, queue, review, splits ----------------
+
+def test_phase2_daily_targets_sum_to_400(tmp_path,monkeypatch):
+    from moa.core import Store
+    from moa.app import collect
+    monkeypatch.setenv('MIN_FREE_MB','100')
+    monkeypatch.delenv('EXCLUDE_OFFICES',raising=False)
+    offices=['B10','C10','D10','E10','F10','G10','H10','I10','J10','K10','M10','N10',
+             'P10','Q10','R10','S10','T10','V10']
+    rows=[school(code,'1') for code in offices]
+    with Store(tmp_path) as store:
+        report=collect(store,FakeNetwork({}),rows,'2026-09-21')
+    assert report['daily_target_total']==400
+    assert report['regions']['B10']['target']==50
+    assert report['regions']['J10']['target']==50
+    assert report['regions']['C10']['target']==20
+    assert 'V10' not in report['regions']
+
+
+def test_gyeonggi_target_is_not_other_target():
+    from moa.core import quota
+    assert quota('J10','경기도교육청',seoul=50,gyeonggi=50,other=20)==50
+    assert quota('J10','경기도교육청',seoul=50,gyeonggi=7,other=20)==7
+    assert quota('B10','서울특별시교육청',seoul=50,gyeonggi=7,other=20)==50
+
+
+def _backfill_fixture(code='C10', posts=6, pages_of=3):
+    rows=[];pages={}
+    s=school(code,'1');s['home_url']='https://example.org/s1/'
+    rows.append(s)
+    board='https://example.org/s1/M0103/'
+    pages[s['home_url']]=f'<a href="{board}">가정통신문</a>'
+    for pg in range(pages_of):
+        url=board if pg==0 else f'{board}?page={pg+1}'
+        links=''.join(
+            f'<tr><td><a href="{board}view/{pg*10+i}">안내 {pg*10+i}</a></td>'
+            f'<td>2026-0{(i%9)+1}-1{i%9}</td></tr>' for i in range(posts))
+        nxt=(f'<a href="{board}?page={pg+2}">{pg+2}</a>' if pg+1<pages_of else '')
+        pages[url]=links+nxt
+        for i in range(posts):
+            n=pg*10+i
+            pages[f'{board}view/{n}']=(f'<div class="nttCn"><p>{n}번째 안내문입니다. '
+                                       f'준비물을 확인해 주세요.</p></div>')
+    return rows,pages
+
+
+def test_backfill_caps_and_incremental_separation(tmp_path,monkeypatch):
+    from moa.core import Store
+    from moa import backfill
+    monkeypatch.setenv('MIN_FREE_MB','100')
+    monkeypatch.setenv('BACKFILL_SCHOOL_DAILY','2')
+    rows,pages=_backfill_fixture()
+    (tmp_path/'registry').mkdir(exist_ok=True)
+    (tmp_path/'registry/schools.json').write_text(json.dumps({'schools':rows}))
+    with Store(tmp_path) as store:
+        campaign=backfill.create_campaign(store)
+        net=FakeNetwork(pages)
+        r=backfill.run_batch(store,net,campaign,batch_notices=30,max_minutes=5)
+        assert r['new']==2          # per-school daily cap 2
+        assert store.count_campaign(campaign['id'])==2
+        assert store.count_day('2026-09-21','C10')==0  # backfill never counts as daily
+        assert store.db.execute('select count(*) from notices').fetchone()[0]==2
+        # A second batch the same day respects the daily cap
+        r2=backfill.run_batch(store,net,campaign,batch_notices=30,max_minutes=5)
+        assert r2['new']==0
+
+
+def test_backfill_checkpoint_resumes_after_stop(tmp_path,monkeypatch):
+    from moa.core import Store
+    from moa import backfill
+    monkeypatch.setenv('MIN_FREE_MB','100')
+    monkeypatch.setenv('BACKFILL_SCHOOL_DAILY','50')
+    monkeypatch.setenv('BACKFILL_SCHOOL_CAP','50')
+    rows,pages=_backfill_fixture()
+    (tmp_path/'registry').mkdir(exist_ok=True)
+    (tmp_path/'registry/schools.json').write_text(json.dumps({'schools':rows}))
+    with Store(tmp_path) as store:
+        campaign=backfill.create_campaign(store)
+        net=FakeNetwork(pages)
+        r=backfill.run_batch(store,net,campaign,batch_notices=1,max_minutes=5)
+        assert r['new']==1
+        cs=store.campaign_school(campaign['id'],'C10:1')
+        assert cs and cs['cursor']  # checkpoint persisted
+    with Store(tmp_path) as store:
+        r=backfill.run_batch(store,net,campaign,batch_notices=30,max_minutes=5)
+        assert store.count_campaign(campaign['id'])>=2
+
+
+def test_backfill_stops_on_repeated_page_and_old_dates(tmp_path,monkeypatch):
+    from moa.core import Store
+    from moa import backfill
+    monkeypatch.setenv('MIN_FREE_MB','100')
+    monkeypatch.setenv('BACKFILL_SCHOOL_DAILY','50')
+    monkeypatch.setenv('BACKFILL_SCHOOL_CAP','50')
+    rows,pages=_backfill_fixture()
+    board='https://example.org/s1/M0103/'
+    pages[board+'?page=3']=pages[board+'?page=2']  # CMS returns the same page again
+    (tmp_path/'registry').mkdir(exist_ok=True)
+    (tmp_path/'registry/schools.json').write_text(json.dumps({'schools':rows}))
+    with Store(tmp_path) as store:
+        campaign=backfill.create_campaign(store)
+        r=backfill.run_batch(store,FakeNetwork(pages),campaign,batch_notices=100,max_minutes=5)
+        cs=store.campaign_school(campaign['id'],'C10:1')
+        assert cs['status']=='done' and r['new']>0
+
+
+def test_pagination_finds_next_page():
+    from moa.crawl import next_page_url, current_page
+    base='https://example.org/list.do?bbsId=1&pageIndex=1'
+    html='<a href="javascript:fn_egov_link_page(\'2\')">2</a>'
+    assert 'pageIndex=2' in next_page_url(html,base)
+    html2='<a href="/list.do?bbsId=1&pageIndex=2">다음</a>'
+    assert 'pageIndex=2' in next_page_url(html2,base)
+    assert next_page_url('<a href="/x">다음</a>',base) is None
+    assert current_page('https://x/1?page=3')==3
+
+
+def test_same_size_different_meaning_tables_get_different_families():
+    from moa.extract import html_document
+    from moa.learn import template_family
+    a=html_document('<table><tr><th>일시</th><th>장소</th></tr><tr><td>3월 1일</td><td>운동장</td></tr></table>')
+    b=html_document('<table><tr><th>품목</th><th>단가</th></tr><tr><td>연필</td><td>500원</td></tr></table>')
+    assert template_family(a['tables'][0])!=template_family(b['tables'][0])
+    c=html_document('<table><tr><th>일시</th><th>장소</th></tr><tr><td>4월 2일</td><td>강당</td></tr></table>')
+    assert template_family(a['tables'][0])==template_family(c['tables'][0])
+
+
+def test_eval_split_excluded_from_search_and_suggestions(tmp_path):
+    from moa.core import Store
+    from moa.learn import learn,search_cases,split_for,export_learning
+    with Store(tmp_path) as s:
+        ident,_=s.save_notice(school(),'https://example.org/1','안내',
+                              '<table><tr><td>장소</td><td>운동장</td></tr></table>',[],'2026-09-21')
+        learn(s,ident)
+        cid,fam=s.db.execute('select id,family_id from cases').fetchone()
+        s.db.execute("update cases set split='eval',approved=1 where id=?",(cid,))
+        s.db.commit()
+        assert search_cases(s,'운동장')==[]
+        assert search_cases(s,'운동장',include_candidates=True)==[]
+        export_learning(s)
+        assert 'eval' in (tmp_path/'learning/eval.jsonl').read_text()
+        assert (tmp_path/'learning/approved.jsonl').read_text()==''
+
+
+def test_review_actions_and_unapprove(tmp_path):
+    from moa.core import Store
+    from moa.learn import learn,review,search_cases
+    with Store(tmp_path) as s:
+        ident,_=s.save_notice(school(),'https://example.org/1','안내',
+                              '<table><tr><td>장소</td><td>운동장</td></tr></table>',[],'2026-09-21')
+        learn(s,ident)
+        cid=s.db.execute('select id from cases').fetchone()[0]
+        review(s,cid,'approved',layout='key_value_cards',reviewer='홍길동',
+               rights_reviewed=True,privacy_reviewed=True,
+               correction={'note':'헤더 병합 수정'})
+        assert search_cases(s,'운동장')
+        review(s,cid,'candidate',reviewer='홍길동',note='승인 취소')
+        row=s.db.execute('select approved,review_status,review_history,correction from cases').fetchone()
+        assert row['approved']==0 and row['review_status']=='candidate'
+        assert '승인 취소' in row['review_history'] and row['correction']
+        review(s,cid,'rejected',reviewer='홍길동')
+        assert s.db.execute('select review_status from cases').fetchone()[0]=='rejected'
+
+
+def test_review_queue_prioritises_new_families(tmp_path):
+    from moa.core import Store
+    from moa.learn import learn,build_review_queue
+    with Store(tmp_path) as s:
+        for n in range(3):
+            ident,_=s.save_notice(school(n=str(n)),f'https://example.org/{n}','안내',
+                f'<table><tr><td>장소{n}</td><td>운동장</td></tr></table>',[],'2026-09-21')
+            learn(s,ident)
+        q=build_review_queue(s,'2026-09-21',20)
+        assert len(q)==3 and all('신규 양식' in c['reasons'] for c in q)
+        assert s.db.execute('select count(*) from review_queue').fetchone()[0]==3
+
+
+def test_analysis_queue_survives_and_retries(tmp_path):
+    from moa.core import Store
+    from moa.learn import drain_analyse
+    with Store(tmp_path) as s:
+        ident,_=s.save_notice(school(),'https://example.org/1','안내',
+                              '<table><tr><td>장소</td><td>운동장</td></tr></table>',[],'2026-09-21')
+        job=s.db.execute("select * from jobs where kind='analyse'").fetchone()
+        assert job and job['status']=='pending'
+        s.db.execute("update jobs set status='running',owner='dead',"
+                     "updated='2000-01-01T00:00:00+09:00'").fetchone
+        s.db.execute("update jobs set status='running',owner='dead',"
+                     "updated='2000-01-01T00:00:00+09:00'")
+        s.db.commit()
+        assert s.requeue_stale_jobs()==1
+        r=drain_analyse(s,10,owner='t')
+        assert r['done']==1 and r['pending']==0
+
+
+def test_shared_request_budget_across_instances(tmp_path):
+    from moa.core import Budget,Store
+    with Store(tmp_path) as s:
+        a=Budget(s,'2026-09-21',3);b=Budget(s,'2026-09-21',3)
+        a.spend();b.spend()
+        assert a.remaining==1 and b.remaining==1
+        a.spend()
+        import pytest as _p
+        with _p.raises(RuntimeError): b.spend()
+
+
+def test_migration_from_v1_creates_backup_and_columns(tmp_path):
+    import sqlite3
+    db=tmp_path/'db';db.mkdir()
+    conn=sqlite3.connect(db/'moa.sqlite3')
+    conn.executescript('''CREATE TABLE notices(id TEXT PRIMARY KEY,office TEXT,school TEXT,
+        day TEXT,url TEXT,payload TEXT,analysis_status TEXT DEFAULT 'pending');
+        CREATE TABLE cases(id TEXT PRIMARY KEY,notice_id TEXT,pattern TEXT,layout TEXT,
+        payload TEXT,approved INTEGER DEFAULT 0,reviewer TEXT,reviewed_at TEXT);
+        INSERT INTO notices VALUES('n1','B10','1','2026-09-20','u','{}','extracted');
+        INSERT INTO cases VALUES('c1','n1','p','l','{}',1,'r','t');''')
+    conn.commit();conn.close()
+    from moa.core import Store,SCHEMA_VERSION
+    with Store(tmp_path) as s:
+        cols={r[1] for r in s.db.execute('PRAGMA table_info(notices)')}
+        assert {'published_date','campaign_id','capture','table_state'}<=cols
+        ccols={r[1] for r in s.db.execute('PRAGMA table_info(cases)')}
+        assert {'family_id','split','review_status'}<=ccols
+        assert s.db.execute('PRAGMA user_version').fetchone()[0]==SCHEMA_VERSION
+        assert s.db.execute("select review_status from cases where id='c1'").fetchone()[0]=='approved'
+        assert list((tmp_path/'db/backups').glob('*.sqlite3'))
+        # Re-opening is idempotent: no second migration crash
+    with Store(tmp_path) as s:
+        assert s.db.execute('select count(*) from notices').fetchone()[0]==1
+
+
+def test_parser_version_change_reanalyses(tmp_path,monkeypatch):
+    from moa.core import Store
+    from moa.learn import extract_asset
+    import moa.learn as L
+    with Store(tmp_path) as s:
+        a=s.object(b'%PDF-1.7 x','a.pdf');a['kind']='pdf'
+        import subprocess
+        from types import SimpleNamespace
+        monkeypatch.setattr(subprocess,'run',
+            lambda *a,**k:SimpleNamespace(returncode=0,stdout=b'{"status":"extracted","text":"x","tables":[]}'))
+        r1=extract_asset(s,a)
+        assert r1['parser_version']==L.PARSER_VERSION
+        monkeypatch.setattr(L,'PARSER_VERSION','moa-local-v3')
+        calls=[]
+        monkeypatch.setattr(subprocess,'run',
+            lambda *a,**k:(calls.append(1),SimpleNamespace(returncode=0,
+                stdout=b'{"status":"extracted","text":"x","tables":[]}'))[1])
+        extract_asset(s,a)
+        assert calls  # new version re-ran the parser instead of serving the v2 cache

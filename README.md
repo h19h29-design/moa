@@ -1,15 +1,14 @@
 # MOA — 가정통신문 자동 수집·표 사례 축적기
 
-매일 **서울 10건, 다른 시도교육청 각각 5건**의 고유 가정통신문을 목표로 수집합니다.
+매일 **서울 50건, 경기 50건, 나머지 15개 시도교육청 각각 20건(총 400건)**의 고유
+가정통신문을 목표로 수집하고, 별도 **백필 캠페인**으로 최근 2년 과거자료를 채웁니다.
 자료·DB·표 추출 결과는 **Synology NAS `/volume2/moa/data`**에 보관합니다.
 
-> v0.1: 수집기, 중복 방지, 표 구조 추출, 로컬 사례 축적, 일일 스케줄러입니다.
-> **전국 학교 실사이트 및 NAS 운영 검증을 마친 제품은 아닙니다.** 지원되지 않는 게시판은
-> 다음 학교로 넘기고, 목표를 채우지 못하면 `partial`과 부족 건수를 기록합니다.
+> v0.2: 수집기, 중복 방지, 표 구조 추출, 분석·검수 대기열, 백필 캠페인, 양식 family,
+> 일일 스케줄러입니다. 지원되지 않는 게시판은 다음 학교로 넘기고, 목표를 채우지
+> 못하면 `partial`과 부족 건수·사유를 기록합니다.
 > **모델 가중치를 자동 학습시키거나 AI의 답을 정답으로 자동 승인하지 않습니다.**
-
-> 전달 상태: 소스 GitHub 업로드는 도구에서 차단되었습니다. 제공 ZIP으로 설치하세요.
-> 저장소에는 초기 `.gitignore`만 반영된 상태이며 자세한 기록은 `docs/DELIVERY.md`에 있습니다.
+> 외부 유료 AI 호출은 기본 비활성이며 이번 단계에서 사용하지 않습니다.
 
 ## 1. 실행 흐름
 
@@ -20,12 +19,12 @@ NEIS 학교목록 (7일마다 갱신)
   → 공개 가정통신문 게시판 탐색
   → 게시글 본문 + 첨부파일 수집
   → SHA-256 단일 객체 저장소
-  → PDF / HWPX / HTML 표 구조 추출
-  → 미검수 후보·구조 패턴 집계
-  → 일일 결과 / 별도 사람 승인 사례
+  → 분석 대기열(jobs) → PDF / HWPX / HTML 표 구조 추출
+  → 양식 family·미검수 후보 집계 → 우선검수 큐 → 사람 승인 사례
+  → 일일 증분 결과와 백필 캠페인 실적을 분리 보고
 ```
 
-- 서울 10, 기타 각 5는 **학교 수/첨부 수가 아닌 신규 고유 통신문 수**입니다.
+- 서울 50, 경기 50, 기타 각 20은 **학교 수/첨부 수가 아닌 신규 고유 통신문 수**입니다.
 - 한 학교에서 기본 하루 1건. 여러 학교·학교급의 양식을 확보합니다.
 - 교육청은 NEIS가 반환한 실제 코드와 이름을 사용합니다. 특정 17개 코드 목록에 고정하지 않습니다.
 - 기존에 본 통신문, 차단된 사이트, 실패한 다운로드는 신규 목표 실적에 포함하지 않습니다.
@@ -114,11 +113,28 @@ sudo docker compose exec collector python -m moa run --office B10
 # 학교 목록 강제 갱신
 sudo docker compose exec collector python -m moa sync-schools
 
-# 실패/미분석 문서 재분석. 미지원 형식은 계속 대기 상태입니다.
+# 분석 대기열 처리(또는 --id로 단건). 미지원 형식은 계속 대기 상태입니다.
 sudo docker compose exec collector python -m moa analyse
+sudo docker compose exec collector python -m moa analyse --batch 100
 
 # 후보 포함 사례 검색; 기본 search는 사람 승인 사례만 조회합니다.
 sudo docker compose exec collector python -m moa search 준비물 --candidates
+
+# 백필 캠페인: 계획 확인 → 생성 → 수동 배치 → 상태/일시중지/재개
+sudo docker compose exec collector python -m moa backfill plan
+sudo docker compose exec collector python -m moa backfill start
+sudo docker compose exec collector python -m moa backfill run --batch 30 --max-minutes 20
+sudo docker compose exec collector python -m moa backfill status
+sudo docker compose exec collector python -m moa backfill pause
+sudo docker compose exec collector python -m moa backfill resume
+
+# 오늘의 우선검수 후보(기본 20건)
+sudo docker compose exec collector python -m moa review-queue
+
+# 검수: 승인/수정승인/반려/보류/승인취소(candidate)
+sudo docker compose exec collector python -m moa review CASE_ID \
+  --status approved --layout key_value_cards --reviewer "관리자" \
+  --rights-reviewed --privacy-reviewed
 
 # 실행 중지 / 재개 (데이터 삭제 없음)
 sudo docker compose stop
@@ -140,10 +156,13 @@ sudo docker compose up -d
     objects/ab/<SHA-256>            원본 파일은 전역에서 한 벌
     documents/<교육청코드>/<날짜>/   학교명·원문 주소·원본 참조·정정본 관계
     extracted/                     문서/표 추출 JSON·미지원 상태
-    learning/candidates.jsonl       미검수 표 사례
+    learning/candidates.jsonl       미검수 표 사례(학습/개발 분할만)
     learning/patterns.jsonl         구조 패턴별 누적 건수
-    learning/approved.jsonl         사람이 검수·승인한 사례만
-    reports/latest.json            최근 실행의 지역별 실적·오류
+    learning/families.jsonl         양식 family별 누적 건수
+    learning/approved.jsonl         사람이 검수·승인한 사례만(평가셋 제외)
+    learning/eval.jsonl             고정 평가용 사례(검색·규칙 생성에서 제외)
+    reports/latest.json            최근 증분 실행의 지역별 실적·오류
+    reports/backfill-latest.json   최근 백필 배치 결과·캠페인 누적
     reports/latest.html            같은 내용을 보는 로컬 보고서
     reports/<날짜>-<실행ID>.json     실행 이력
 ```
@@ -185,10 +204,22 @@ sudo docker compose exec collector python -m moa approve CASE_ID \
 
 `approved.jsonl`은 검수된 구조/레이아웃 사례입니다. 완성된 HTML 정답 세트나
 바로 파인튜닝 가능한 학습 파일을 만들어냈다는 뜻은 아닙니다.
-향후 학습/평가 데이터를 나눌 때 동일 패턴·근접 복제본을 서로 다른 집합에 섞지 마세요.
-`split_group`을 보조로 제공하지만 별도의 고정 평가셋 설계가 필요합니다.
+사례는 양식 family 단위로 학습/개발/평가(약 80/10/10)에 배정되며,
+평가셋은 사례 검색·규칙 생성·추천에서 제외됩니다(`learning/eval.jsonl` 별도 파일).
 
-## 6. 게시판 차이와 어댑터
+## 6. 백필 캠페인과 검수 흐름
+
+- `backfill start`는 캠페인 기간(생성일 기준 최근 2년)·목표(1만)·상한(2만)·시드를
+  고정 저장하고, 이후 배치는 학교/게시판/페이지 단위 체크포인트에서 이어집니다.
+- 학교당 캠페인 전체 10건·하루 2건 상한. 중단·재부팅 후에도 실적과 커서가 유지됩니다.
+- 백필 실적은 일일 증분 목표와 분리 집계되며(`campaign_id`), 파일 중복 방지는 공유합니다.
+- 스케줄러는 04:00 증분 실행을 우선하고, 남은 요청 예산으로 백필 배치를 돌립니다.
+  cron을 별도 등록하지 않습니다.
+- 접근 가능한 후보가 소진되면 `coverage_exhausted`로 멈추고 사유를 남깁니다.
+- 매일 `review-queue`가 우선검수 후보(기본 20건)를 고르고, `review` 명령으로
+  승인·수정승인(`--correction`)·반려·보류·승인취소를 기록합니다.
+
+## 7. 게시판 차이와 어댑터
 
 기본 어댑터는 서버가 제공하는 HTML 링크를 읽습니다.
 `/M.../view/<번호>`, `selectNttList.do → selectNttInfo.do`, `boardCnts/view.do`,
@@ -214,7 +245,7 @@ JavaScript 전체 실행, 로그인/캡차, POST 전용 다운로드 등은 우�
 원인과 공식 주소를 확인하세요. 수집 제외는 같은 학교 항목에 `"disabled": true`를 지정합니다.
 학교목록 CSV/JSON을 별도로 확보한 경우 `docs/REGISTRY.md`를 참고하세요.
 
-## 7. 안전·운영 제한
+## 8. 안전·운영 제한
 
 공개 게시판이라도 저작물 이용조건·개인정보 제한이 사라지지 않습니다.
 robots.txt 존중은 수집 예절/기술 제어이며 저작권 허락을 대신하지 않습니다.
@@ -231,7 +262,7 @@ HTTP GET만 사용하며 내부/특수 IP 차단, 검증된 IP로 연결 고정,
 정식 백업 절차를 사용하세요. 실행 중 `moa.sqlite3` 파일 하나만 복사하면 WAL 내용이 빠질 수 있습니다.
 업데이트는 `.env`와 `data`를 유지한 채 새 코드를 받고 `docker compose up -d --build`를 실행합니다.
 
-## 8. 개발·테스트
+## 9. 개발·테스트
 
 Python 3.12/Linux 기준입니다. 아래 테스트는 네트워크 모의 응답과 합성 문서로 실행합니다.
 실제 학교 문서/비밀키를 저장소에 넣지 않습니다.
@@ -249,7 +280,7 @@ sh -n scripts/install-nas.sh
 `docs/VERIFICATION.md`에 있습니다.
 GitHub Actions 설정은 푸시·PR 시 같은 테스트를 실행하도록 제공됩니다.
 
-## 9. 실제 운영에서 확인된 제약 (2026-09-21 NAS 실측)
+## 10. 실제 운영에서 확인된 제약 (2026-09-21 NAS 실측)
 
 전국 실사이트를 직접 확인한 결과이며, 코드로 우회하지 않고 사실대로 기록합니다.
 

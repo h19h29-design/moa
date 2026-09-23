@@ -14,6 +14,7 @@ from defusedxml import ElementTree
 from .core import digest, encode
 
 LAYOUTS = ('key_value_cards','timeline','grade_cards','comparison','read_only_form','scroll_table')
+PARSER_VERSION = 'moa-local-v2'
 
 
 def detect_kind(data: bytes, filename: str = '') -> str:
