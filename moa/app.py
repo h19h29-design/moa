@@ -349,6 +349,9 @@ def cli(argv=None) -> int:
     sub.add_parser('status',help='수집/분석/검수 건수')
     sub.add_parser('doctor',help='설정/저장경로 점검')
     sub.add_parser('health',help='스케줄러 생존 점검')
+    serve=sub.add_parser('serve',help='로컬 검수 웹 화면(기본 127.0.0.1:8321)')
+    serve.add_argument('--host',default=os.environ.get('MOA_REVIEW_HOST','127.0.0.1'))
+    serve.add_argument('--port',type=int,default=integer('MOA_REVIEW_PORT',8321,1,65535))
     sub.add_parser('export',help='후보/승인/패턴 JSONL 재생성')
     analyse=sub.add_parser('analyse',help='분석 대기열 처리(또는 --id로 단건 재분석)')
     analyse.add_argument('--id');analyse.add_argument('--batch',type=int,default=200)
@@ -376,6 +379,9 @@ def cli(argv=None) -> int:
     root=args.data.resolve()
     try:
         if args.command=='schedule': schedule(root);return 0
+        if args.command=='serve':
+            from .web import serve as _serve
+            _serve(root,args.host,args.port);return 0
         if args.command=='run': return 0 if run_once(root,args.office)['status']=='complete' else 2
         if args.command=='health':
             heartbeat_data=json.loads((root/'heartbeat.json').read_text())

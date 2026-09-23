@@ -897,3 +897,133 @@ def test_parser_version_change_reanalyses(tmp_path,monkeypatch):
                 stdout=b'{"status":"extracted","text":"x","tables":[]}'))[1])
         extract_asset(s,a)
         assert calls  # new version re-ran the parser instead of serving the v2 cache
+
+
+# ---------- Phase 3: consistency, mobile render, review web -------------------
+
+def test_render_mobile_preserves_every_cell_verbatim():
+    from moa.extract import html_document
+    from moa.render import render_mobile
+    doc=html_document('<table><tr><th>일시</th><th>장소</th></tr>'
+                      '<tr><td>2026년 3월 4일 14:00</td><td>체육관</td></tr>'
+                      '<tr><td>참가비</td><td>10,000원 (형제 무료)</td></tr></table>')
+    t=doc['tables'][0]
+    for layout in ('key_value_cards','scroll_table','timeline','grade_cards'):
+        out=render_mobile(t,layout)
+        for text in ('2026년 3월 4일 14:00','체육관','10,000원 (형제 무료)','일시','장소'):
+            assert text in out, (layout,text)
+
+
+def test_render_mobile_merged_cells_and_fallback():
+    from moa.extract import html_document
+    from moa.render import render_mobile
+    doc=html_document('<table><tr><th colspan="2">안내</th></tr>'
+                      '<tr><td>가</td><td>나</td></tr></table>')
+    out=render_mobile(doc['tables'][0],'scroll_table')
+    assert 'colspan="2"' in out and '가' in out and '나' in out
+    assert '원문 표' in out  # raw fallback always present
+    empty=render_mobile({'cells':[]},'scroll_table')
+    assert '표가 없습니다' in empty
+
+
+def test_parser_change_updates_candidate_but_not_approved(tmp_path,monkeypatch):
+    from moa.core import Store
+    import moa.learn as L
+    with Store(tmp_path) as s:
+        ident,_=s.save_notice(school(),'https://example.org/1','안내',
+                              '<table><tr><td>장소</td><td>운동장</td></tr></table>',[],'2026-09-21')
+        L.learn(s,ident)
+        cid=s.db.execute('select id from cases').fetchone()[0]
+        old=json.loads(s.db.execute('select payload from cases').fetchone()[0])
+        # simulate parser upgrade producing a different table for a candidate
+        monkeypatch.setattr(L,'PARSER_VERSION','moa-local-v9')
+        monkeypatch.setattr(L,'html_document',
+            lambda h:{'status':'extracted','text':'x','tables':[
+                {'rows':2,'cols':2,'cells':[{'row':0,'col':0,'rowspan':1,'colspan':1,
+                 'text':'일시','header':True},{'row':0,'col':1,'rowspan':1,'colspan':1,
+                 'text':'3월 5일','header':False}]}]})
+        L.learn(s,ident)
+        new=json.loads(s.db.execute('select payload from cases').fetchone()[0])
+        assert new['table']['cells'][1]['text']=='3월 5일'
+        # approved case is frozen even under a new parser
+        s.db.execute("update cases set review_status='approved',approved=1")
+        s.db.commit()
+        L.learn(s,ident)
+        frozen=json.loads(s.db.execute('select payload from cases').fetchone()[0])
+        assert frozen['table']['cells'][1]['text']=='3월 5일'  # keeps last human-approved view
+
+
+def test_correction_is_used_in_export_and_view(tmp_path):
+    from moa.core import Store
+    from moa.learn import learn,review,effective_table,export_learning
+    with Store(tmp_path) as s:
+        ident,_=s.save_notice(school(),'https://example.org/1','안내',
+                              '<table><tr><td>장소</td><td>운동장</td></tr></table>',[],'2026-09-21')
+        learn(s,ident)
+        row=s.db.execute('select * from cases').fetchone()
+        corr={'table':{'rows':1,'cols':2,'cells':[{'row':0,'col':0,'rowspan':1,'colspan':1,
+              'text':'장소(수정)','header':True},{'row':0,'col':1,'rowspan':1,'colspan':1,
+              'text':'강당','header':False}]}}
+        review(s,row['id'],'approved',layout='key_value_cards',reviewer='검수자',
+               rights_reviewed=True,privacy_reviewed=True,correction=corr)
+        row=s.db.execute('select * from cases').fetchone()
+        assert effective_table(row)['cells'][1]['text']=='강당'
+        export_learning(s)
+        data=(tmp_path/'learning/approved.jsonl').read_text()
+        assert '강당' in data and 'extracted_table' in data
+
+
+def test_family_normalisation_merges_school_names(tmp_path):
+    from moa.extract import html_document
+    from moa.learn import template_family
+    a=html_document('<table><tr><th>일시</th><th>장소</th></tr>'
+                    '<tr><td>3월 1일</td><td>가나초등학교 체육관</td></tr></table>')
+    b=html_document('<table><tr><th>일시</th><th>장소</th></tr>'
+                    '<tr><td>4월 2일</td><td>다라중학교 강당</td></tr></table>')
+    assert template_family(a['tables'][0])==template_family(b['tables'][0])
+
+
+def test_review_web_requires_token_and_serves(tmp_path,monkeypatch):
+    import threading,urllib.request,urllib.parse
+    from moa.core import Store
+    from moa.learn import learn
+    from moa.web import Handler,serve
+    from http.server import ThreadingHTTPServer
+    store=Store(tmp_path,thread_safe=True)
+    ident,_=store.save_notice(school(),'https://example.org/1','안내',
+                              '<table><tr><td>장소</td><td>운동장</td></tr></table>',[],'2026-09-21')
+    learn(store,ident)
+    cid=store.db.execute('select id from cases').fetchone()[0]
+    Handler.store=store;Handler.token='tok123'
+    srv=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    threading.Thread(target=srv.serve_forever,daemon=True).start()
+    port=srv.server_address[1]
+    try:
+        page=urllib.request.urlopen(f'http://127.0.0.1:{port}/').read().decode()
+        assert 'MOA' in page
+        case=urllib.request.urlopen(f'http://127.0.0.1:{port}/case?id={cid}').read().decode()
+        assert '운동장' in case and '모바일 미리보기' in case
+        pv=urllib.request.urlopen(f'http://127.0.0.1:{port}/preview?id={cid}&layout=scroll_table').read().decode()
+        assert '운동장' in pv
+        # POST without token -> 403
+        data=urllib.parse.urlencode({'case_id':cid,'status':'approved','reviewer':'x'}).encode()
+        try:
+            urllib.request.urlopen(f'http://127.0.0.1:{port}/review',data)
+            assert False
+        except urllib.error.HTTPError as e: assert e.code==403
+        # wrong token -> 403
+        data=urllib.parse.urlencode({'case_id':cid,'status':'approved','reviewer':'x',
+                                     'token':'bad','rights':'1','privacy':'1',
+                                     'layout':'key_value_cards'}).encode()
+        try:
+            urllib.request.urlopen(f'http://127.0.0.1:{port}/review',data)
+            assert False
+        except urllib.error.HTTPError as e: assert e.code==403
+        # right token -> approve
+        data=urllib.parse.urlencode({'case_id':cid,'status':'approved','reviewer':'검수자',
+                                     'token':'tok123','rights':'1','privacy':'1',
+                                     'layout':'key_value_cards'}).encode()
+        urllib.request.urlopen(f'http://127.0.0.1:{port}/review',data)
+        assert store.db.execute('select approved from cases').fetchone()[0]==1
+    finally:
+        srv.shutdown();store.db.close()

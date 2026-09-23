@@ -20,7 +20,10 @@ PII = re.compile(r'\b\d{6}\s*[-]\s*[1-8]\d{6}\b|\b01[016789][- .]?\d{3,4}[- .]?\
 # Roles that make a table risky to lose: dates, money, audience, units, exceptions.
 RISK = re.compile(r'20\d{2}|\d{1,2}월|\d{1,2}일|[\d,]+\s*원|\d+\s*명|무료|유료|제외|마감|기한|동의|서명')
 UNIT = re.compile(r'원|명|시간|분|cm|kg|%|학년|학급|교실')
-NORMALISE = re.compile(r'[0-9]+|[일이삼사오육칠팔구십]?학년|테스트|\s+')
+# School names, dates and serial numbers split families without changing meaning.
+NORMALISE = re.compile(
+    r'[0-9]+|[일이삼사오육칠팔구십]?학년|[\w가-힣]*(?:초등학교|중학교|고등학교|학교|유치원)'
+    r'|20\d{2}년?|\d{1,2}월|\d{1,2}일|테스트|\s+')
 
 
 def _limits():
@@ -107,12 +110,24 @@ def learn(store: Store, ident: str) -> dict:
                     'suggestion': pred, 'family_id': family,
                     'privacy_flag': privacy_flag, 'rights': 'unreviewed',
                     'status': 'candidate', 'created_at': kst_now().isoformat(),
-                    'split_group': family}
-            store.db.execute(
-                'INSERT OR IGNORE INTO cases(id,notice_id,pattern,layout,payload,family_id,split)'
-                ' VALUES(?,?,?,?,?,?,?)',
-                (case_id, ident, pred['pattern'], pred['layout'], encode(case),
-                 family, split_for(family)))
+                    'split_group': family, 'parser_version': PARSER_VERSION}
+            existing = store.db.execute(
+                'SELECT review_status, payload FROM cases WHERE id=?', (case_id,)).fetchone()
+            if existing is None:
+                store.db.execute(
+                    'INSERT INTO cases(id,notice_id,pattern,layout,payload,family_id,split)'
+                    ' VALUES(?,?,?,?,?,?,?)',
+                    (case_id, ident, pred['pattern'], pred['layout'], encode(case),
+                     family, split_for(family)))
+            elif existing['review_status'] == 'candidate':
+                # A new parser version updates unreviewed candidates in place; approved
+                # and rejected/held cases are frozen human decisions and never touched.
+                old = json.loads(existing['payload'])
+                if old.get('parser_version') != PARSER_VERSION or old.get('table') != safe_table:
+                    store.db.execute(
+                        'UPDATE cases SET payload=?, pattern=?, layout=?, family_id=?'
+                        " WHERE id=? AND review_status='candidate'",
+                        (encode(case), pred['pattern'], pred['layout'], family, case_id))
             # Pre-v2 cases keep their row (and approval); only fill the new columns.
             store.db.execute('UPDATE cases SET family_id=?, split=? WHERE id=? AND family_id IS NULL',
                              (family, split_for(family), case_id))
@@ -137,17 +152,30 @@ def learn(store: Store, ident: str) -> dict:
 def drain_analyse(store: Store, limit: int = 50, owner: str = 'worker') -> dict:
     """Consume the persistent analysis queue; surviving jobs keep their attempts."""
     done, failed = 0, 0
+    outcomes = {}
     for job in store.claim_jobs('analyse', limit, owner):
         try:
-            learn(store, job['ref_id'])
+            res = learn(store, job['ref_id'])
             store.finish_job(job['id'])
             done += 1
+            # job done = processed; the document outcome stays separate.
+            outcomes[res['status']] = outcomes.get(res['status'], 0) + 1
         except Exception as exc:
             store.fail_job(job['id'], type(exc).__name__ + ': ' + str(exc)[:200])
             failed += 1
     return {'done': done, 'failed': failed,
+            'outcomes': outcomes,
             'pending': store.db.execute(
                 "SELECT count(*) FROM jobs WHERE kind='analyse' AND status='pending'").fetchone()[0]}
+
+
+def effective_table(row) -> dict:
+    """The table to display/search/export: human correction wins over raw extraction."""
+    if row['correction']:
+        corr = json.loads(row['correction'])
+        if isinstance(corr, dict) and corr.get('table'):
+            return corr['table']
+    return json.loads(row['payload']).get('table', {})
 
 
 def build_review_queue(store: Store, day: str, limit: int = 20) -> list[dict]:
@@ -251,7 +279,12 @@ def export_learning(store: Store):
                          layout=row['layout'], reviewer=row['reviewer'],
                          reviewed_at=row['reviewed_at'], split=row['split'])
                 if row['correction']:
-                    d['correction'] = json.loads(row['correction'])
+                    corr = json.loads(row['correction'])
+                    d['correction'] = corr
+                    # The corrected table is the operative one in every export.
+                    if isinstance(corr, dict) and corr.get('table'):
+                        d['extracted_table'] = d.get('table')
+                        d['table'] = corr['table']
             yield d
     write_jsonl(store.root/'learning'/'candidates.jsonl',
                 records(0, ('train', 'dev')))

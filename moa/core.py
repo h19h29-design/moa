@@ -87,11 +87,14 @@ def run_lock(root: Path):
 
 
 class Store:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, thread_safe: bool = False):
         self.root = Path(root).resolve()
         for name in ('db', 'objects', 'documents', 'extracted', 'learning', 'reports', 'registry'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.root / 'db/moa.sqlite3', timeout=30)
+        # thread_safe=True is for the local review UI whose server handles each
+        # request on a new thread; callers still serialise through web.py's lock.
+        self.db = sqlite3.connect(self.root / 'db/moa.sqlite3', timeout=30,
+                                  check_same_thread=not thread_safe)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA foreign_keys=ON')

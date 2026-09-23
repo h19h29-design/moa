@@ -1,4 +1,42 @@
-# 검증 기록 — 2026-09-23 (2단계)
+# 검증 기록 — 2026-09-23 (3단계)
+
+## 실행 결과
+- `python -m pytest -q`: 68 passed (2단계 62 + 3단계 6)
+- 대상: Synology DS925-Home, `app-collector-1` healthy, `app-review-1` up
+
+## 3단계로 검증된 항목
+- 검수 웹 화면(`python -m moa serve`, compose `review` 서비스):
+  NAS `127.0.0.1:8321` 바인드만(공인 포트 없음). `GET /` 우선검수 큐 200,
+  `GET /case?id=` 원문+첨부 링크+추출 표+수정 textarea+모바일 미리보기 iframe+이력 200,
+  `GET /preview?id=` 모바일 HTML 200, `GET /obj/<sha>` 첨부 다운로드 200,
+  잘못된 sha 400, 경로탐색 404, 토큰 없는 `POST /review` 403.
+- 모바일 HTML 렌더러(`moa/render.py`): key_value_cards/grade_cards/timeline/scroll_table,
+  rowspan·colspan 보존, 셀 텍스트 verbatim, 미지원 구간은 `<details>` 원문 표 fallback.
+  실데이터 확인: 부산 버스킹 신청서 표가 병합 구조 그대로 렌더됨.
+- 정합성: 파서 버전 변경 시 candidate 사례만 payload/pattern/family 갱신,
+  approved/rejected/held는 불변. 사람 수정본(`correction`)이 화면·검색·추천·export에서
+  일관 적용(`effective_table()`), export는 correction을 `table`로 승격하고 원 추출을
+  `extracted_table`로 보존. 승인취소(candidate) 시 캐시·집계에 반영.
+- family 과분할 완화: 정규화에서 학교명·날짜·금액 제거 → 같은 양식이 학교/날짜별로
+  쪼개지지 않음(테스트: 학교명만 다른 두 사례가 같은 family).
+- 작업 done과 추출 성공 구분: jobs.done=354 중 analysis.extracted=185,
+  partial=169, pending=4로 별도 집계.
+
+## NAS 실측 (2026-09-23, 3단계 배포 후)
+- 문서 358(당일 증분 55, 백필 신규 누적 193), 표 사례 341, family 296, 승인 0(전부 candidate)
+- 검수 화면 실접속 확인: `ssh -L 8321:localhost:8321 ds925-home` → http://localhost:8321
+- compose `review` 서비스 command 수정: ENTRYPOINT가 `python -m moa`이므로
+  command는 `serve ...`만(처음 배포에서 `python -m moa` 중복으로 재시작 루프 → 수정)
+- 외부 AI 호출 0건, 비용 0
+
+## 아직 미검증
+- 사람이 화면에서 실제 승인·수정한 뒤의 이력/캐시 반영(실자료 승인은 사용자 몫)
+- 모바일 렌더의 브라우저 시각 확인(HTML 구조·보존은 검증, 픽셀 단위는 미확인)
+- 400건/일 목표 달성 여부, 10,000건 백필 완주
+
+---
+
+# 이전 기록 — 2026-09-23 (2단계)
 
 ## 실행 결과
 - `python -m pytest -q`: 62 passed (1단계 48 + 2단계 14)

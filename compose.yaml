@@ -34,3 +34,39 @@ services:
       options:
         max-size: 10m
         max-file: "3"
+
+  # 로컬 검수 화면. 기본은 NAS 자체(127.0.0.1)에만 열리고, 공인/외부 포트를 만들지 않는다.
+  # 접속: ssh -L 8321:localhost:8321 <NAS> 후 http://localhost:8321
+  # 변경(승인·수정·반려)은 MOA_REVIEW_TOKEN이 있어야만 동작한다.
+  review:
+    image: moa-notice-collector:local
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      MOA_DATA_DIR: /data
+      TZ: Asia/Seoul
+    command: ["serve", "--host", "0.0.0.0", "--port", "8321"]
+    user: "${MOA_UID:-10001}:${MOA_GID:-10001}"
+    volumes:
+      - type: bind
+        source: ${NAS_DATA_DIR:-/volume2/moa/data}
+        target: /data
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 64
+    ports:
+      - "127.0.0.1:8321:8321"
+    depends_on:
+      - collector
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "2"
