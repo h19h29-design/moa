@@ -156,6 +156,10 @@ def run_batch(store: Store, fetcher, campaign: dict, batch_notices: int = 30,
         if store.school_blocked(key):
             continue
         cs = store.campaign_school(campaign['id'], key) or {}
+        # Fresh schools have no row yet; direct cs['collected'] reads below would
+        # KeyError and skip the cursor checkpoint, re-scanning the board forever.
+        cs.setdefault('collected', 0)
+        cs.setdefault('day_collected', 0)
         if cs.get('status') in ('done', 'capped'):
             continue
         if (cs.get('collected') or 0) >= school_cap:

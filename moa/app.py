@@ -51,6 +51,11 @@ def registry(store: Store, fetcher) -> tuple[list[dict], str | None]:
 
 def _block_kind(reason: str) -> tuple[str, float]:
     """Failure class → (state, days until recheck). Permanent blocks are retried rarely."""
+    # Our own daily budget is not a school failure: record the state for visibility
+    # but leave next_retry in the past so the school is retried as soon as budget
+    # exists again. Caching it as 'error' (1d) used to starve whole regions for a day.
+    if '요청 상한' in reason:
+        return 'budget', 0
     if 'robots' in reason:
         return 'robots', 7
     if '로그인' in reason or '인증' in reason or '권한' in reason:
@@ -224,6 +229,8 @@ def collect(store: Store, fetcher, schools: list[dict], day: str,
                                            'reason':str(exc)[:300]})
                 kind,retry=_block_kind(str(exc))
                 store.record_school(key,kind,str(exc)[:200],retry_days=retry)
+                if kind=='budget':
+                    break  # local budget exhausted; remaining schools would all fail the same way
         stats['total_today']=store.count_day(day,office)
         stats['shortfall']=max(0,goal-stats['total_today'])
         if extra_hosts:
@@ -317,7 +324,10 @@ def schedule(root: Path):
                         print(encode({'event':'analyse_batch',**drained}),flush=True)
                     campaign=store.active_campaign()
                     # A backed-up analysis queue slows backfill first; incremental never waits.
-                    if campaign and campaign['status']=='active' and drained['pending']==0:
+                    # The request budget resets at midnight while the incremental runs at
+                    # DAILY_AT — without the 'done' guard pre-dawn batches drain the new
+                    # day's budget before 04:00 (observed 2026-09-25/26: 0 new docs).
+                    if done and campaign and campaign['status']=='active' and drained['pending']==0:
                         meter=Budget(store,now.date().isoformat(),
                                      integer('MAX_HTTP_REQUESTS',5000,10,20000))
                         if meter.remaining>integer('BACKFILL_MIN_REQUESTS_LEFT',200,0,10000):
