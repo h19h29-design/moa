@@ -2,6 +2,33 @@
 
 ---
 
+# 추가 기록 — 2026-09-29 (학교 서버 TLS 체인 결함 대응)
+
+## 발견·수정한 결함
+
+1. **세종 109교 전체가 CERTIFICATE_VERIFY_FAILED로 차단** — sjedu 도메인 서버가
+   리프 인증서에 엉뚱한 체인(DigiCert 중간)을 붙여 보내고 정작 발급 중간 인증서인
+   'Sectigo Public Server Authentication CA DV R36'을 보내지 않아 정상 검증이
+   불가능했다. 브라우저는 AIA/캐시로 중간 인증서를 보완하지만 정적 번들만 쓰는
+   수집기는 실패했다. 전수 조사에서 실패 122개 학교의 리프 발급자는 3개뿐이었다:
+   Sectigo DV R36(109), Sectigo RSA OV(12), Let's Encrypt YE2(1).
+2. **MOA_EXTRA_CA로 공인 중간/루트 인증서를 번들에 병합** — 각 리프의 AIA
+   caIssuers에서 받은 공인 인증서만 사용하고, openssl verify로 신뢰 루트까지의
+   서명을 확인한 뒤 certifi 루트와 합친다. 체인·호스트명 검증은 그대로 유지되며
+   우회가 아니다. ISRG Root YE는 아직 certifi에 없는 공인 LE 루트라 함께 넣었다.
+   배치: /volume2/moa/data/certs/extra-issuers.pem (4개 인증서).
+3. 잔여 한계: SSLV3_ALERT_HANDSHAKE_FAILURE(전북 일부)는 서버의 구형 TLS
+   협상 거부라 번들로 해결되지 않고, 외부 호스트 리다이렉트 차단은 별도 정책
+   사안이라 그대로 둔다.
+
+## 배포·검증
+
+- pytest 69개 통과 (ca_bundle 병합 테스트 추가)
+- NAS 재배포 후 컨테이너에서 https://gowoon.sjeduhs.kr/ 실측 → HTTP 200
+- school_state 'tls' 122행 next_retry 해제로 당일 재시도 허용
+
+---
+
 # 추가 기록 — 2026-09-27 (수집 공백 원인 수정)
 
 ## 발견·수정한 결함

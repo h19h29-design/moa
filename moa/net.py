@@ -4,6 +4,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import socket
+import tempfile
 import time
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
@@ -19,6 +20,38 @@ from bs4 import UnicodeDammit
 BOT_TOKEN = 'MoaNoticeBot'
 AGENT = os.environ.get('MOA_USER_AGENT',
                        'Mozilla/5.0 (compatible; MoaNoticeBot/0.1; +https://github.com/h19h29-design/moa)')
+
+_BUNDLE = None
+
+
+def ca_bundle() -> str:
+    """certifi roots plus optional extra public CA/issuer PEMs in MOA_EXTRA_CA.
+
+    A noticeable share of Korean school servers terminate the chain at the leaf
+    or attach an unrelated chain (a Sectigo leaf with DigiCert intermediates was
+    observed), so verification fails without a locally supplied intermediate.
+    Supplying the missing public issuers only lets OpenSSL complete the path;
+    chain and hostname verification stay fully enforced.
+    """
+    global _BUNDLE
+    if _BUNDLE:
+        return _BUNDLE
+    base = certifi.where()
+    extra = os.environ.get('MOA_EXTRA_CA', '').strip()
+    if not extra:
+        _BUNDLE = base
+        return base
+    with open(extra, 'rb') as fh:
+        pem = fh.read()
+    if b'BEGIN CERTIFICATE' not in pem:
+        raise RuntimeError('MOA_EXTRA_CA에 인증서가 없습니다: ' + extra)
+    path = os.path.join(tempfile.gettempdir(), 'moa-ca-bundle.pem')
+    with open(base, 'rb') as fh, open(path, 'wb') as out:
+        out.write(fh.read())
+        out.write(b'\n')
+        out.write(pem)
+    _BUNDLE = path
+    return path
 
 
 def canonical_url(url: str) -> str:
@@ -109,7 +142,7 @@ class Fetcher:
                     self.meter.spend(1)
                 time.sleep(2.0 * attempt)
             pool = (urllib3.HTTPSConnectionPool(ip, server_hostname=host, assert_hostname=host,
-                        cert_reqs='CERT_REQUIRED', ca_certs=certifi.where(), **kw)
+                        cert_reqs='CERT_REQUIRED', ca_certs=ca_bundle(), **kw)
                     if p.scheme == 'https' else urllib3.HTTPConnectionPool(ip, **kw))
             response = None
             try:

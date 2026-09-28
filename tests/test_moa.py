@@ -1027,3 +1027,27 @@ def test_review_web_requires_token_and_serves(tmp_path,monkeypatch):
         assert store.db.execute('select approved from cases').fetchone()[0]==1
     finally:
         srv.shutdown();store.db.close()
+
+
+def test_ca_bundle_merges_extra_issuers(tmp_path, monkeypatch):
+    import certifi
+    from moa import net
+    extra = tmp_path/'extra.pem'
+    extra.write_bytes(b'-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n')
+    monkeypatch.setenv('MOA_EXTRA_CA', str(extra))
+    net._BUNDLE = None
+    path = net.ca_bundle()
+    try:
+        data = Path(path).read_bytes()
+        assert data != Path(certifi.where()).read_bytes()
+        assert b'BEGIN CERTIFICATE-----\nZmFrZQ==' in data
+        # missing env -> plain certifi
+        monkeypatch.delenv('MOA_EXTRA_CA'); net._BUNDLE = None
+        assert net.ca_bundle() == certifi.where()
+        # env set but no certs inside -> clear error
+        bad = tmp_path/'bad.pem'; bad.write_text('not a cert')
+        monkeypatch.setenv('MOA_EXTRA_CA', str(bad)); net._BUNDLE = None
+        with pytest.raises(RuntimeError):
+            net.ca_bundle()
+    finally:
+        net._BUNDLE = None
