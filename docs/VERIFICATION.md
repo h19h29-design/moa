@@ -2,6 +2,34 @@
 
 ---
 
+# 추가 기록 — 2026-09-29 #2 (HWP·DOCX 파서 + 사이트 이전 robots 추적)
+
+## 발견·수정한 결함
+
+1. **HWP5 이진 문서와 DOCX가 미분석(needs_parser)으로만 남았다** — partial 1,578건 중
+   hwp 314·image 204·pdf 51·hwpx 11개 자산(표본 400건 기준). 순수 Python HWP5
+   레코드 파서를 구현해 OLE BodyText 스트림에서 표 셀(주소·병합·본문 텍스트)을 읽는다.
+   중첩 표는 nested 플래그로 표시하고 셀 텍스트에 섞지 않는다. DOCX는 표준 XML에서
+   gridSpan/vMerge를 해석한다. image는 여전히 needs_vision(로컬 OCR 없음),
+   암호화 HWP는 needs_parser(note=encrypted)로 남긴다. PARSER_VERSION=v3.
+2. **robots.txt 조회가 학교의 호스팅 이전 리다이렉트에서 차단됐다** — 광주 283교가
+   gen.*.kr → jge.*.kr 같은 공식 이전을 공지하는데, robots 조회가 다른 호스트로
+   넘어가면 '승인되지 않은 외부 호스트'로 실패해 학교 전체가 캐시 차단됐다.
+   robots 조회만 이전 호스트를 최대 2개까지 따라가며, 대상 호스트는 이후 페이지
+   fetch가 같은 이전을 따르도록 학교 호스트 집합에 합류한다.
+3. 잔여: 전북 일부 서버의 구형 TLS 협상 거부(SSLV3_ALERT_HANDSHAKE_FAILURE)와
+   sen 플랫폼 robots는 정책상 우회하지 않는다.
+
+## 배포·검증
+
+- pytest 71개 통과 (HWP 셀 파싱·robots 이전 추적·CA 병합 테스트 추가)
+- 실물 HWP(울산고운고 평가계획)에서 4x3 병합 표 1개와 한글 셀 텍스트 추출 확인
+- jg.gen.ms.kr → jg.jge.ms.kr 이전 추적 후 HTTP 200 확인
+- school_state의 광주 '외부 호스트' 283행 next_retry 해제
+- 재분석: partial/pending 1,579건을 analyse 큐에 재등록
+
+---
+
 # 추가 기록 — 2026-09-29 (학교 서버 TLS 체인 결함 대응)
 
 ## 발견·수정한 결함

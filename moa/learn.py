@@ -42,7 +42,7 @@ def extract_asset(store: Store, asset: dict) -> dict:
         if cached.get('status') != 'parse_error' and cached.get('parser_version') == PARSER_VERSION:
             return cached
     kind = asset.get('kind', 'unsupported')
-    if kind in ('image', 'hwp', 'legacy_ole', 'docx', 'unsupported'):
+    if kind in ('image', 'unsupported'):
         result = {'status': 'needs_vision' if kind == 'image' else 'needs_parser',
                   'text': '', 'tables': [], 'kind': kind}
     else:

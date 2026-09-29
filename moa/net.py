@@ -170,10 +170,20 @@ class Fetcher:
         raise RuntimeError('HTTP 연결 실패')
 
     def _raw(self, url: str, limit: int, allowed_hosts: set[str]) -> Response:
+        moved = 0
         for _ in range(6):
             url = canonical_url(url)
-            if urlsplit(url).hostname not in allowed_hosts:
-                raise ValueError('승인되지 않은 외부 호스트로의 이동을 차단했습니다.')
+            host = urlsplit(url).hostname
+            if host not in allowed_hosts:
+                # A robots.txt probe may be redirected to the host the site moved to
+                # (e.g. gen.ms.kr -> jge.ms.kr). The moved rules then legitimately
+                # govern the origin, and the target joins the school's host set so the
+                # page fetch itself can follow the same announced move. Bounded to two
+                # new hosts; anything further is still blocked.
+                if moved >= 2:
+                    raise ValueError('승인되지 않은 외부 호스트로의 이동을 차단했습니다.')
+                moved += 1
+                allowed_hosts.add(host)
             r = self._one(url, limit)
             if r.status in (301,302,303,307,308) and 'location' in r.headers:
                 url = urljoin(url, r.headers['location'])

@@ -890,7 +890,7 @@ def test_parser_version_change_reanalyses(tmp_path,monkeypatch):
             lambda *a,**k:SimpleNamespace(returncode=0,stdout=b'{"status":"extracted","text":"x","tables":[]}'))
         r1=extract_asset(s,a)
         assert r1['parser_version']==L.PARSER_VERSION
-        monkeypatch.setattr(L,'PARSER_VERSION','moa-local-v3')
+        monkeypatch.setattr(L,'PARSER_VERSION','moa-local-v4')
         calls=[]
         monkeypatch.setattr(subprocess,'run',
             lambda *a,**k:(calls.append(1),SimpleNamespace(returncode=0,
@@ -1051,3 +1051,62 @@ def test_ca_bundle_merges_extra_issuers(tmp_path, monkeypatch):
             net.ca_bundle()
     finally:
         net._BUNDLE = None
+
+
+def test_robots_probe_follows_announced_host_move(monkeypatch):
+    from moa.net import Fetcher, Response
+    f = Fetcher(delay=1)
+
+    def fake_one(url, limit):
+        if url == 'http://old.example.kr/robots.txt':
+            return Response(url, 301, {'location': 'http://new.example.kr/robots.txt'}, b'')
+        return Response(url, 200, {}, b'User-agent: *\nDisallow:\n')
+
+    monkeypatch.setattr(f, '_one', fake_one)
+    hosts = {'old.example.kr'}
+    r = f._raw('http://old.example.kr/robots.txt', 1024, hosts)
+    assert r.status == 200
+    assert 'new.example.kr' in hosts
+
+    hops = iter(['http://h1.example.kr/x', 'http://h2.example.kr/x',
+                 'http://h3.example.kr/x'])
+    monkeypatch.setattr(f, '_one',
+                        lambda url, limit: Response(url, 301, {'location': next(hops)}, b''))
+    with pytest.raises(ValueError):
+        f._raw('http://start.example.kr/x', 1024, {'start.example.kr'})
+
+
+def _hwp_rec(tag, level, body):
+    import struct
+    if len(body) >= 0xfff:
+        return struct.pack('<II', tag | (level << 10) | (0xfff << 20), len(body)) + body
+    return struct.pack('<I', tag | (level << 10) | (len(body) << 20)) + body
+
+
+def _hwp_cell(col, row, colspan, rowspan, text):
+    import struct
+    body = (b'\x01\x00\x00\x00' + b'\x20\x00\x00\x00'
+            + struct.pack('<HHHH', col, row, colspan, rowspan)
+            + b'\x00' * (47 - 16))
+    para = ('가'.encode('utf-16-le') + text.encode('utf-16-le') + b'\x0d\x00')
+    return (_hwp_rec(72, 2, body) + _hwp_rec(66, 2, b'\x00' * 24)
+            + _hwp_rec(67, 3, para) + _hwp_rec(69, 3, b'\x00' * 36))
+
+
+def test_hwp_table_cells_and_spans():
+    import struct
+    from moa.extract import _hwp_cells, _hwp_text
+    stream = (b'\x00' * 0
+              + _hwp_rec(71, 1, struct.pack('<I', 0x74626c20) + b'\x00' * 44)
+              + _hwp_rec(77, 2, b'\x00' * 30)
+              + _hwp_cell(0, 0, 2, 1, '제목')
+              + _hwp_cell(0, 1, 1, 1, '항목')
+              + _hwp_cell(1, 1, 1, 1, '내용'))
+    tables = _hwp_cells(stream)
+    assert len(tables) == 1
+    t = tables[0]
+    assert t['rows'] == 2 and t['cols'] == 2 and len(t['cells']) == 3
+    assert t['cells'][0]['colspan'] == 2 and '제목' in t['cells'][0]['text']
+    assert t['cells'][1]['text'].startswith('가항목')
+    assert _hwp_text('\x0bOCR어쩌구\x00\x00\x00\x00\x00\x00\x0b\x00'.encode('utf-16-le')
+                     + '본문'.encode('utf-16-le')) == '본문'
