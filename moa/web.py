@@ -21,7 +21,8 @@ from .learn import build_review_queue, effective_table, review
 from .render import render_mobile, render_page
 from .web_auth import AuthMixin
 from .web_mobile import MobileMixin
-from . import mobile
+from .web_corpus import CorpusMixin
+from . import mobile, corpus
 
 DB_LOCK = threading.RLock()
 
@@ -53,7 +54,7 @@ PAGE = ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         '.hist{font-size:12px;color:#567}</style></head><body>')
 
 
-class Handler(AuthMixin, MobileMixin, BaseHTTPRequestHandler):
+class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
     store: Store = None
     token: str = ''
 
@@ -117,6 +118,8 @@ class Handler(AuthMixin, MobileMixin, BaseHTTPRequestHandler):
                 return self._home()
             if path == '/queue':
                 return self._queue()
+            if path == '/corpus':return self._corpus(q)
+            if path == '/corpus/detail':return self._corpus_detail(q.get('id',[''])[0])
             if path == '/notice':
                 return self._notice(q.get('id',[''])[0],q.get('revision',[''])[0])
             if path == '/mobile/preview':
@@ -297,6 +300,7 @@ class Handler(AuthMixin, MobileMixin, BaseHTTPRequestHandler):
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('<p>요청 인증을 확인하세요.</p>',403)
             if path == '/logout': return self._logout()
+            if path.startswith('/corpus/'):return self._corpus_post(path,form)
             if path == '/mobile/import':
                 doc = self.store.notice(form.get('notice_id',[''])[0])
                 ident = mobile.register_collected(self.store,doc)
@@ -336,6 +340,7 @@ class Handler(AuthMixin, MobileMixin, BaseHTTPRequestHandler):
 def serve(root, host='127.0.0.1', port=8321):
     store = Store(root, thread_safe=True)
     mobile.queue_outdated(store)
+    corpus.enqueue_missing(store)
     Handler.store = store
     Handler.token = os.environ.get('MOA_REVIEW_TOKEN', '')
     server = ThreadingHTTPServer((host, port), Handler)
@@ -346,6 +351,13 @@ def serve(root, host='127.0.0.1', port=8321):
             queue_store.db.commit()
             while not stopped.is_set():
                 mobile.drain_mobile(queue_store)
+                with DB_LOCK:
+                    corpus.requeue_stale(queue_store)
+                    curated=corpus.drain(queue_store,2)
+                    if curated and not queue_store.db.execute("SELECT 1 FROM jobs WHERE kind='curate' AND status IN ('pending','running') LIMIT 1").fetchone():
+                        from .learn import export_learning
+                        export_learning(queue_store)
+                        mobile.export_mobile(queue_store)
                 stopped.wait(1)
     worker_thread = threading.Thread(target=worker,daemon=True,name='moa-mobile-worker')
     worker_thread.start()

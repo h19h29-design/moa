@@ -7,13 +7,15 @@
 - 접속: **https://moa.h19h19.com** → 기존 검수 암호로 로그인.
 - 원본·후보 HTML·첨부 다운로드를 포함한 모든 자료에 인증이 필요합니다.
 - 상세 사용법과 지원 범위: [docs/NOTICE_MOBILE.md](docs/NOTICE_MOBILE.md).
+- 기존 수집 자료 활용 분류: **https://moa.h19h19.com/corpus** → 파일별 역할·보류 사유 확인/수정.
+  [docs/CORPUS.md](docs/CORPUS.md)의 후보/원본 첨부/보류/제외/평가 구분을 사용합니다.
 - 실자료는 자동 승인하지 않습니다. 승인한 변환 버전의 구조·표현만 다음 추천에 사용합니다.
 
 매일 **서울 50건, 경기 50건, 나머지 15개 시도교육청 각각 20건(총 400건)**의 고유
 가정통신문을 목표로 수집하고, 별도 **백필 캠페인**으로 최근 2년 과거자료를 채웁니다.
 자료·DB·표 추출 결과는 **Synology NAS `/volume2/moa/data`**에 보관합니다.
 
-> v0.4: 업로드 중심 모바일 안내문 변환과 버전별 검수, 기존 수집·백필·표 분석 기능입니다.
+> v0.5: 기존 수집 자료의 파일별 활용 분류·이력·추천/내보내기 차단을 추가했습니다.
 > 지원되지 않는 게시판은 다음 학교로 넘기고, 목표를 채우지
 > 못하면 `partial`과 부족 건수·사유를 기록합니다.
 > **모델 가중치를 자동 학습시키거나 AI의 답을 정답으로 자동 승인하지 않습니다.**
@@ -125,6 +127,11 @@ sudo docker compose exec collector python -m moa sync-schools
 # 분석 대기열 처리(또는 --id로 단건). 미지원 형식은 계속 대기 상태입니다.
 sudo docker compose exec collector python -m moa analyse
 sudo docker compose exec collector python -m moa analyse --batch 100
+
+# 기존 자료 분류: 수집 실적을 늘리지 않고 로컬 규칙·기존 파서 결과로만 처리합니다.
+# 웹 서비스도 영속 분류 대기열을 이어서 처리합니다. 후보는 승인/훈련 완료가 아닙니다.
+sudo docker compose exec review python -m moa corpus status
+sudo docker compose exec review python -m moa corpus classify --batch 50
 
 # 후보 포함 사례 검색; 기본 search는 사람 승인 사례만 조회합니다.
 sudo docker compose exec collector python -m moa search 준비물 --candidates

@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo('Asia/Seoul')
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def kst_now() -> datetime:
@@ -172,9 +172,23 @@ class Store:
           revision_id TEXT NOT NULL REFERENCES mobile_revisions(id),
           action TEXT NOT NULL, reason TEXT NOT NULL, note TEXT NOT NULL,
           reviewer TEXT NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS corpus_notices(
+          notice_id TEXT PRIMARY KEY REFERENCES notices(id),
+          mobile_id TEXT NOT NULL REFERENCES mobile_notices(id),
+          use TEXT NOT NULL, files TEXT NOT NULL, fingerprint TEXT NOT NULL,
+          version TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS corpus_use ON corpus_notices(use,updated_at);
+        CREATE TABLE IF NOT EXISTS corpus_reviews(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          notice_id TEXT NOT NULL REFERENCES notices(id), file_id TEXT NOT NULL,
+          fingerprint TEXT NOT NULL, action TEXT NOT NULL,
+          payload TEXT NOT NULL, reviewer TEXT NOT NULL, note TEXT NOT NULL,
+          created_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS corpus_history_notice ON corpus_reviews(notice_id);
         ''')
         self.db.execute('CREATE INDEX IF NOT EXISTS notices_campaign ON notices(campaign_id)')
         self.db.execute('CREATE INDEX IF NOT EXISTS cases_family ON cases(family_id)')
+        self.db.execute('CREATE INDEX IF NOT EXISTS cases_notice ON cases(notice_id)')
         if existed and version < SCHEMA_VERSION:
             # Re-analysis backfills family_id/split on old cases and retries partial docs.
             self.db.execute(

@@ -115,7 +115,7 @@ def register_collected(store: Store, doc: dict) -> str:
         files.append({**obj, 'kind':'html', 'id':'body', 'role':'convert', 'scope':'auto',
                       'form_start':None, 'boundary_confirmed':False, 'incomplete':False})
     for i,asset in enumerate(doc.get('assets', [])):
-        files.append({**asset, 'id':str(i), 'role':default_role(asset.get('filename','')),
+        files.append({**asset, 'kind':asset.get('kind','unsupported'), 'id':str(i), 'role':default_role(asset.get('filename','')),
                       'scope':'auto', 'form_start':None, 'boundary_confirmed':False,
                       'incomplete':False})
     ident = digest(('collected:' + doc['id']).encode())[:32]
@@ -266,11 +266,13 @@ def structure_key(table: dict) -> str:
 
 
 def approved_rules(store: Store) -> dict:
-    rows = store.db.execute("SELECT n.id,n.approved_revision,r.payload FROM mobile_notices n"
+    from .corpus import mobile_allowed
+    rows = store.db.execute("SELECT n.id,n.origin_notice_id,n.approved_revision,r.payload FROM mobile_notices n"
                             " JOIN mobile_revisions r ON r.id=n.approved_revision"
                             " WHERE n.state='approved' AND n.latest_revision=n.approved_revision AND n.split!='eval'")
     rules = {}
     for row in rows:
+        if not mobile_allowed(store,row):continue
         data = json.loads(row['payload'])
         if data.get('parser_version') != PARSER_VERSION or data.get('converter_version') != CONVERTER_VERSION:
             continue
@@ -462,7 +464,12 @@ def save_revision(store: Store, ident: str, data: dict) -> dict:
 
 
 def generate(store: Store, ident: str, edits=None, title='') -> dict:
-    return save_revision(store,ident,build_conversion(store,ident,edits,title))
+    result=save_revision(store,ident,build_conversion(store,ident,edits,title))
+    row=notice_row(store,ident)
+    if row['origin_notice_id']:
+        from .corpus import classify_notice
+        classify_notice(store,row['origin_notice_id'])
+    return result
 
 
 def correct(store: Store, ident: str, rid: str, blocks: list, title: str = '') -> dict:

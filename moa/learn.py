@@ -82,6 +82,7 @@ def split_for(group: str) -> str:
 
 
 def learn(store: Store, ident: str) -> dict:
+    from .corpus import case_allowed
     doc = store.notice(ident)
     results = [('body', html_document(doc['body_html']))] if doc['body_html'] else []
     results.extend((a['sha256'], extract_asset(store, a)) for a in doc['assets'])
@@ -97,9 +98,9 @@ def learn(store: Store, ident: str) -> dict:
             family = template_family(table)
             case_id = digest((ident+':'+source+':'+str(index)).encode())
             old = store.db.execute(
-                "SELECT layout FROM cases WHERE pattern=? AND approved=1 AND split!='eval'",
+                "SELECT * FROM cases WHERE pattern=? AND approved=1 AND split!='eval'",
                 (pred['pattern'],)).fetchall()
-            reviewed = {r[0] for r in old}
+            reviewed = {r['layout'] for r in old if case_allowed(store,r)}
             if len(reviewed) == 1:
                 pred['layout'] = next(iter(reviewed))
                 pred['method'] = 'approved-pattern-suggestion'  # suggestion != approval
@@ -149,6 +150,8 @@ def learn(store: Store, ident: str) -> dict:
     write_json(store.root/'extracted'/f'{ident}-notice.json', result)
     from .mobile import register_collected
     register_collected(store, doc)
+    from .corpus import classify_notice
+    classify_notice(store,ident)
     return result
 
 
@@ -269,6 +272,7 @@ def approve(store: Store, case_id: str, layout: str, reviewer: str,
 
 
 def export_learning(store: Store):
+    from .corpus import case_allowed
     # Streaming atomic replacement; repeated exports never append duplicate rows.
     # Eval-split rows are exported separately and never mixed into search/rules data.
     def records(approved, splits):
@@ -276,7 +280,9 @@ def export_learning(store: Store):
         for row in store.db.execute(
                 'SELECT * FROM cases WHERE approved=? AND split IN (%s) ORDER BY id' % marks,
                 (approved,)):
+            if not case_allowed(store,row,table_candidate=not approved):continue
             d = json.loads(row['payload'])
+            if not approved:d['learning_permission']='unreviewed_not_training_input'
             if approved:
                 d.update(status='human_reviewed', rights='operator_reviewed',
                          layout=row['layout'], reviewer=row['reviewer'],
@@ -308,6 +314,7 @@ def export_learning(store: Store):
 
 
 def search_cases(store: Store, query: str, include_candidates: bool = False) -> list[dict]:
+    from .corpus import case_allowed
     if len(query) > 200:
         raise ValueError('검색어 길이 제한')
     query = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
@@ -318,6 +325,7 @@ def search_cases(store: Store, query: str, include_candidates: bool = False) -> 
         ('%'+query+'%', int(include_candidates)))
     out = []
     for row in rows:
+        if not include_candidates and not case_allowed(store,row):continue
         item = dict(row)
         payload = json.loads(item['payload'])
         payload['table'] = effective_table(row)

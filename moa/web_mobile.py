@@ -27,7 +27,7 @@ STYLE = ('label{display:block;margin:12px 0}label input:not([type=checkbox]),lab
 class MobileMixin:
     def _page(self, content):
         from .web import PAGE
-        nav = ('<nav class="nav"><a href="/">MOA · 업로드</a><a href="/queue">수집자료 검수</a>'
+        nav = ('<nav class="nav"><a href="/">MOA · 업로드</a><a href="/corpus">기존자료 분류</a><a href="/queue">표 사례 검수</a>'
                '<form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav>')
         return PAGE.replace('</style>',STYLE+'</style>')+nav+content
 
@@ -92,6 +92,10 @@ class MobileMixin:
         content = '<h1>%s</h1><p><span class="pill">%s</span> %s</p>' % (esc(row['title']),state,
             ('변환 버전 '+str(rev['sequence'])) if rev else '먼저 파일별 역할을 확인하세요.')
         if row['split']=='eval': content += '<p class="muted">평가용 자료 · 추천 사례에서 제외됩니다.</p>'
+        if row['origin_notice_id']:
+            from .corpus import get_record,USES
+            curation=get_record(self.store,row['origin_notice_id'])
+            content+='<p class="card">자료 활용 분류: %s · <a href="/corpus/detail?id=%s">파일별 분류 확인·수정</a></p>' % (esc(USES[curation['use']] if curation else '미분류'),esc(row['origin_notice_id']))
         if old: content += '<p class="warning">과거 버전입니다. <a href="/notice?id=%s">최신 버전 열기</a></p>' % esc(ident)
         if processing:
             content += '<p class="card" id="conversion-state" data-id="%s">모바일 HTML을 생성하고 있습니다. 완료되면 화면이 갱신됩니다.</p><script src="/static/mobile.js" defer></script>' % esc(ident)
@@ -127,9 +131,9 @@ class MobileMixin:
         for warning in data.get('warnings',[]): content += '<p class="warning">'+esc(warning['message'])+'</p>'
         originals = ''
         for file in data['files']:
-            if file['kind'] == 'image':
+            if file.get('kind') == 'image':
                 originals += '<details><summary>%s</summary><img class="original-img" src="/mobile/original?id=%s&file=%s" alt="원본 이미지"></details>' % (esc(file['filename']),esc(ident),esc(file['id']))
-            elif file['kind'] == 'pdf':
+            elif file.get('kind') == 'pdf':
                 originals += '<details><summary>%s · PDF 원본 보기</summary><iframe src="/mobile/original?id=%s&file=%s"></iframe></details>' % (esc(file['filename']),esc(ident),esc(file['id']))
         for source in data.get('sources',[]):
             originals += '<details open><summary>원문 추출 텍스트 · 파일 %s</summary><pre>%s</pre></details>' % (esc(source['file_id']),esc(source.get('text','')))
@@ -178,12 +182,12 @@ class MobileMixin:
         file = next((f for f in json.loads(row['files']) if f['id']==fid),None)
         if not file: return self._send('<p>파일 없음</p>',404)
         path = self.store.object_path(file['sha256'])
-        if original and file['kind'] == 'image':
+        if original and file.get('kind') == 'image':
             header = path.read_bytes()[:16]
             ctype = 'image/png' if header.startswith(b'\x89PNG') else 'image/jpeg' if header.startswith(b'\xff\xd8') else \
                     'image/gif' if header.startswith(b'GIF') else 'image/webp' if header.startswith(b'RIFF') else 'application/octet-stream'
             return self._send_bytes(path.read_bytes(),file['filename'],ctype,inline=ctype!='application/octet-stream')
-        if original and file['kind'] == 'pdf': return self._send_bytes(path.read_bytes(),file['filename'],'application/pdf',inline=True)
+        if original and file.get('kind') == 'pdf': return self._send_bytes(path.read_bytes(),file['filename'],'application/pdf',inline=True)
         return self._send_file(path,file['filename'])
 
     def _mobile_preview(self, ident, rid=''):

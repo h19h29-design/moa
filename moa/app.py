@@ -365,6 +365,9 @@ def cli(argv=None) -> int:
     sub.add_parser('export',help='후보/승인/패턴 JSONL 재생성')
     analyse=sub.add_parser('analyse',help='분석 대기열 처리(또는 --id로 단건 재분석)')
     analyse.add_argument('--id');analyse.add_argument('--batch',type=int,default=200)
+    cur=sub.add_parser('corpus',help='기존 자료의 로컬 활용 분류 (승인/AI 훈련 아님)')
+    cur.add_argument('action',choices=['status','queue','classify'])
+    cur.add_argument('--batch',type=int,default=50)
     bf=sub.add_parser('backfill',help='과거자료 수집 캠페인')
     bf.add_argument('action',choices=['plan','start','run','status','pause','resume'])
     bf.add_argument('--batch',type=int,default=30);bf.add_argument('--max-minutes',type=int,default=20)
@@ -406,7 +409,7 @@ def cli(argv=None) -> int:
                    'remote_ai_enabled':False,'model_training_enabled':False}
             print(json.dumps(check,ensure_ascii=False,indent=2))
             return 0 if check['writable'] and (check['neis_key_set'] or check['registry_exists']) else 2
-        readonly = args.command in ('status','search','review-queue') or \
+        readonly = args.command in ('status','search','review-queue','corpus') or \
             (args.command=='backfill' and args.action in ('plan','status','start','pause','resume'))
         with (run_lock(root) if not readonly else _no_lock()),Store(root) as store:
             if args.command=='sync-schools':
@@ -445,6 +448,14 @@ def cli(argv=None) -> int:
                   'external_ai':'미사용',
                   'last_run':dict(last) if last else None},ensure_ascii=False,indent=2))
             elif args.command=='export': export_learning(store)
+            elif args.command=='corpus':
+                from . import corpus
+                if not 1<=args.batch<=500:raise ValueError('분류 배치는 1~500 범위여야 합니다.')
+                if args.action in ('queue','classify'):corpus.enqueue_missing(store)
+                if args.action=='classify':
+                    corpus.requeue_stale(store)
+                    corpus.drain(store,args.batch)
+                print(json.dumps(corpus.stats(store),ensure_ascii=False,indent=2))
             elif args.command=='search': print(json.dumps(search_cases(store,args.query,args.candidates),ensure_ascii=False,indent=2))
             elif args.command=='analyse':
                 if args.id:
