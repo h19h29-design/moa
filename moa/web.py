@@ -191,7 +191,7 @@ class Handler(BaseHTTPRequestHandler):
                 '</div></form>')
         html_doc = (PAGE + '<p><a href="/">← 큐</a></p>'
             '<div class="card"><b>%s</b> <span class="muted">%s · %s · 게시일 %s · %s</span><br>'
-            '<a href="%s">원문 페이지</a> · 상태 %s · family %s%s</div>'
+            '<a href="%s" target="_blank" rel="noopener">원문 페이지↗</a> · 상태 %s · family %s%s</div>'
             '<div class="cols"><div class="card"><b>원문(텍스트)</b><pre>%s</pre>'
             '<b>첨부</b><ul>%s</ul></div>'
             '<div class="card"><b>추출 표%s</b><table>%s</table></div></div>'
