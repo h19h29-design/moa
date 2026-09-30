@@ -14,7 +14,7 @@ from defusedxml import ElementTree
 from .core import digest, encode
 
 LAYOUTS = ('key_value_cards','timeline','grade_cards','comparison','read_only_form','scroll_table')
-PARSER_VERSION = 'moa-local-v3'
+PARSER_VERSION = 'moa-local-v4'
 
 
 def detect_kind(data: bytes, filename: str = '') -> str:
@@ -49,8 +49,16 @@ def _span(value) -> int:
 
 def html_document(html: str) -> dict:
     soup=BeautifulSoup(html,'html.parser')
-    for bad in soup.select('script,style,nav,form'):
+    for bad in soup.select('script,style,nav'):
         bad.decompose()
+    # A form can contain submission instructions. Keep its visible text while
+    # generating only fixed read-only HTML, never original interactive controls.
+    for form in soup.select('form'):
+        form.unwrap()
+    for anchor in soup.find_all('a',href=True):
+        href = anchor['href']
+        if not href.lower().startswith(('javascript:','data:','file:')) and href not in anchor.get_text():
+            anchor.append(' ('+href+')')
     tables=[]
     all_tables=soup.select('table')
     if len(all_tables)>100: raise ValueError('표 개수 제한 초과')
@@ -71,7 +79,29 @@ def html_document(html: str) -> dict:
         tables.append({'rows':max((c['row']+c['rowspan'] for c in cells),default=0),
                        'cols':max((c['col']+c['colspan'] for c in cells),default=0),
                        'cells':cells,'source':'html','nested':bool(tbl.select('table'))})
-    return {'status':'extracted','text':soup.get_text('\n',strip=True),'tables':tables}
+    positions = {id(t): i for i, t in enumerate(all_tables)}
+    def flow(nodes):
+        out = []
+        for node in nodes:
+            if getattr(node, 'name', None) == 'table':
+                out.append({'type': 'table', 'table_index': positions[id(node)]})
+            elif getattr(node, 'name', None) in ('p','h1','h2','h3','h4','li','pre'):
+                if node.find('table'):
+                    out.extend(flow(node.children))
+                elif node.get_text(' ', strip=True):
+                    out.append({'type': 'paragraph', 'text': node.get_text(' ', strip=True)})
+            elif getattr(node, 'name', None):
+                out.extend(flow(node.children))
+            elif str(node).strip():
+                out.append({'type': 'paragraph', 'text': str(node).strip()})
+        return out
+    for i,tbl in enumerate(all_tables):
+        direct = [td for tr in tbl.select('tr') if tr.find_parent('table') is tbl
+                  for td in tr.find_all(['td','th'],recursive=False)]
+        for cell,td in zip(tables[i]['cells'],direct):
+            cell['blocks'] = flow(td.children)
+    return {'status':'extracted','text':soup.get_text('\n',strip=True),'tables':tables,
+            'blocks':flow(soup.children)}
 
 
 def hwpx_document(data: bytes) -> dict:
@@ -149,6 +179,8 @@ def _hwp_records(data: bytes):
                 break
             size = struct.unpack('<I', data[off+4:off+8])[0]
             hdr = 8
+        if off + hdr + size > len(data):
+            raise ValueError('잘린 HWP 레코드')
         body = data[off+hdr:off+hdr+size]
         yield tag, level, body
         off += hdr + size
@@ -179,56 +211,82 @@ def _hwp_text(raw: bytes) -> str:
     return ''.join(out).strip()
 
 
-def _hwp_cells(section: bytes):
+def _hwp_content(section: bytes) -> tuple[list, list]:
+    """Keep paragraph/table order, including tables nested in layout cells."""
     import struct
     recs = list(_hwp_records(section))
     tables = []
-    i = 0
-    while i < len(recs):
-        tag, level, body = recs[i]
-        i += 1
-        if tag != 71 or len(body) < 4 or struct.unpack('<I', body[:4])[0] != 0x74626c20:
-            continue
-        cells, nested = [], 0
-        while i < len(recs) and recs[i][1] > level:
-            ctag, clevel, cbody = recs[i]
-            if ctag == 72 and clevel == level + 1 and len(cbody) >= 26:
-                col, row, colspan, rowspan = struct.unpack('<HHHH', cbody[8:16])
-                texts, skip = [], None
-                for j in range(i + 1, len(recs)):
-                    t2, l2, b2 = recs[j]
-                    if l2 < clevel or (l2 == clevel and t2 == 72):
-                        break
-                    if skip is not None:
-                        if l2 > skip:
-                            continue
-                        skip = None
-                    if t2 == 71 and len(b2) >= 4 \
-                            and struct.unpack('<I', b2[:4])[0] == 0x74626c20:
-                        nested += 1
-                        skip = l2
-                    elif t2 == 67:
-                        t = _hwp_text(b2)
-                        if t:
-                            texts.append(t)
-                cells.append({'row': row, 'col': col, 'rowspan': max(1, rowspan),
-                              'colspan': max(1, colspan), 'text': '\n'.join(texts),
-                              'header': row == 0})
+
+    def table_control(rec):
+        return rec[0] == 71 and len(rec[2]) >= 4 and \
+            struct.unpack('<I', rec[2][:4])[0] == 0x74626c20
+
+    def end_control(start, limit):
+        end = start + 1
+        while end < limit and recs[end][1] > recs[start][1]:
+            end += 1
+        return end
+
+    def flow(start, end, depth=0):
+        if depth > 16:
+            raise ValueError('HWP 중첩 깊이 제한 초과')
+        out, i = [], start
+        while i < end:
+            tag, level, body = recs[i]
+            if table_control(recs[i]):
+                stop = end_control(i, end)
+                index = parse_table(i, stop, depth + 1)
+                out.append({'type': 'table', 'table_index': index})
+                i = stop
+                continue
+            if tag == 67:
+                text = _hwp_text(body)
+                if text:
+                    out.append({'type': 'paragraph', 'text': text})
             i += 1
-        if cells:
-            addrs = [(c['row'], c['col']) for c in cells]
-            end_r = max(c['row'] + c['rowspan'] for c in cells)
-            end_c = max(c['col'] + c['colspan'] for c in cells)
-            covered = set()
-            for c in cells:
-                for rr in range(c['row'], c['row'] + c['rowspan']):
-                    for cc in range(c['col'], c['col'] + c['colspan']):
-                        covered.add((rr, cc))
-            uncertain = len(addrs) != len(set(addrs)) or len(covered) != end_r * end_c
-            tables.append({'rows': end_r, 'cols': end_c, 'cells': cells,
-                           'source': 'hwp', 'nested': nested > 0,
-                           'geometry_uncertain': bool(nested or uncertain)})
-    return tables
+        return out
+
+    def parse_table(start, stop, depth):
+        if len(tables) >= 100:
+            raise ValueError('HWP 표 개수 제한 초과')
+        index = len(tables)
+        tables.append({})
+        level = recs[start][1]
+        starts = [i for i in range(start + 1, stop)
+                  if recs[i][0] == 72 and recs[i][1] == level + 1
+                  and len(recs[i][2]) >= 26]
+        cells = []
+        for n, i in enumerate(starts):
+            col, row, cs, rs = struct.unpack('<HHHH', recs[i][2][8:16])
+            if row >= 1000 or col >= 200 or len(cells) >= 10000:
+                raise ValueError('HWP 표 좌표/크기 제한 초과')
+            rs, cs = _span(rs), _span(cs)
+            if row + rs > 1000 or col + cs > 200:
+                raise ValueError('HWP 표 병합 범위 제한 초과')
+            content = flow(i + 1, starts[n + 1] if n + 1 < len(starts) else stop, depth)
+            cells.append({'row': row, 'col': col, 'rowspan': rs, 'colspan': cs,
+                          'text': '\n'.join(b['text'] for b in content if b['type'] == 'paragraph'),
+                          'header': row == 0, 'blocks': content})
+        end_r = max((c['row'] + c['rowspan'] for c in cells), default=0)
+        end_c = max((c['col'] + c['colspan'] for c in cells), default=0)
+        covered = set()
+        overlap = False
+        for c in cells:
+            for rr in range(c['row'], c['row'] + c['rowspan']):
+                for cc in range(c['col'], c['col'] + c['colspan']):
+                    overlap |= (rr, cc) in covered
+                    covered.add((rr, cc))
+        nested = any(b['type'] == 'table' for c in cells for b in c['blocks'])
+        tables[index] = {'rows': end_r, 'cols': end_c, 'cells': cells, 'source': 'hwp',
+                         'nested': nested, 'geometry_uncertain': overlap or len(covered) != end_r * end_c}
+        return index
+
+    blocks = flow(0, len(recs))
+    return tables, blocks
+
+
+def _hwp_cells(section: bytes):
+    return _hwp_content(section)[0]
 
 
 def hwp_document(data: bytes) -> dict:
@@ -240,34 +298,47 @@ def hwp_document(data: bytes) -> dict:
         if flags & 2:
             return {'status': 'needs_parser', 'text': '', 'tables': [],
                     'kind': 'hwp', 'note': 'encrypted'}
-        texts, tables = [], []
-        for name in ole.listdir():
+        texts, tables, blocks = [], [], []
+        names = sorted(ole.listdir(), key=lambda n: (n[0], int(re.search(r'\d+', n[-1]).group())
+                       if re.search(r'\d+', n[-1]) else 0))
+        for name in names:
             if name[0] == 'BodyText' and len(name) > 1:
                 raw = ole.openstream(name).read()
                 if flags & 1:
                     import zlib
-                    raw = zlib.decompress(raw, -15)
-                paras, stack = [], []
+                    dec = zlib.decompressobj(-15)
+                    raw = dec.decompress(raw, 30 * 1024 * 1024 + 1)
+                    if len(raw) > 30 * 1024 * 1024 or dec.unconsumed_tail:
+                        raise ValueError('HWP 압축해제 용량 제한 초과')
                 for tag, level, body in _hwp_records(raw):
-                    while stack and level <= stack[-1]:
-                        stack.pop()
-                    if tag == 71 and len(body) >= 4 \
-                            and struct.unpack('<I', body[:4])[0] == 0x74626c20:
-                        stack.append(level)
-                    elif tag == 67 and not stack:
+                    if tag == 67:
                         t = _hwp_text(body)
                         if t:
-                            paras.append(t)
-                texts.extend(paras)
-                tables.extend(_hwp_cells(raw))
+                            texts.append(t)
+                section_tables, section_blocks = _hwp_content(raw)
+                offset = len(tables)
+                def remap(items):
+                    for item in items:
+                        if item['type'] == 'table':
+                            item['table_index'] += offset
+                remap(section_blocks)
+                for table in section_tables:
+                    for cell in table['cells']:
+                        remap(cell['blocks'])
+                tables.extend(section_tables)
+                blocks.extend(section_blocks)
         status = 'extracted' if texts or tables else 'needs_parser'
         return {'status': status, 'text': '\n'.join(texts), 'tables': tables,
-                'kind': 'hwp'}
+                'blocks': blocks, 'kind': 'hwp'}
 
 
 def docx_document(data: bytes) -> dict:
     ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
     with zipfile.ZipFile(io.BytesIO(data)) as z:
+        info = z.infolist()
+        if len(info) > 1000 or sum(i.file_size for i in info) > 50*1024*1024 or \
+                any(i.file_size > 20*1024*1024 or i.file_size/max(i.compress_size,1) > 500 for i in info):
+            raise ValueError('DOCX 압축해제 제한 초과')
         root = ElementTree.fromstring(z.read('word/document.xml'))
     texts, tables = [], []
     for tbl in root.iter(ns + 'tbl'):
@@ -325,8 +396,18 @@ def docx_document(data: bytes) -> dict:
         t = ''.join(e.text or '' for e in p.iter(ns + 't'))
         if t.strip():
             texts.append(t.strip())
+    table_nodes = list(root.iter(ns + 'tbl'))
+    positions = {id(t): i for i,t in enumerate(table_nodes)}
+    blocks = []
+    body = root.find(ns + 'body')
+    for el in body if body is not None else root:
+        if el.tag == ns + 'tbl':
+            blocks.append({'type':'table','table_index':positions[id(el)]})
+        elif el.tag == ns + 'p':
+            text = ''.join(e.text or '' for e in el.iter(ns + 't'))
+            if text.strip(): blocks.append({'type':'paragraph','text':text.strip()})
     return {'status': 'extracted' if texts or tables else 'needs_parser',
-            'text': '\n'.join(texts), 'tables': tables}
+            'text': '\n'.join(texts), 'tables': tables, 'blocks':blocks}
 
 
 def table_pattern(table: dict) -> dict:

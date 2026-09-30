@@ -28,7 +28,8 @@ NORMALISE = re.compile(
 
 def _limits():
     # Linux-only worker is memory/CPU bounded and never executes document macros.
-    resource.setrlimit(resource.RLIMIT_AS, (700*1024*1024, 700*1024*1024))
+    if sys.platform.startswith('linux'):
+        resource.setrlimit(resource.RLIMIT_AS, (700*1024*1024, 700*1024*1024))
     resource.setrlimit(resource.RLIMIT_CPU, (40, 40))
     resource.setrlimit(resource.RLIMIT_FSIZE, (64*1024*1024, 64*1024*1024))
 
@@ -53,7 +54,7 @@ def extract_asset(store: Store, asset: dict) -> dict:
             if p.returncode or len(p.stdout) > 30*1024*1024:
                 raise ValueError('문서 분석 작업 실패')
             result = json.loads(p.stdout)
-        except (subprocess.TimeoutExpired, ValueError, OSError) as e:
+        except (subprocess.SubprocessError, ValueError, OSError) as e:
             result = {'status': 'parse_error', 'error': type(e).__name__, 'text': '', 'tables': []}
     result['parser_version'] = PARSER_VERSION
     write_json(path, result)
@@ -146,6 +147,8 @@ def learn(store: Store, ident: str) -> dict:
     result = {'notice_id': ident, 'tables': total, 'status': status,
               'table_state': table_state, 'pending': pending}
     write_json(store.root/'extracted'/f'{ident}-notice.json', result)
+    from .mobile import register_collected
+    register_collected(store, doc)
     return result
 
 
@@ -309,8 +312,15 @@ def search_cases(store: Store, query: str, include_candidates: bool = False) -> 
         raise ValueError('검색어 길이 제한')
     query = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
     rows = store.db.execute(
-        "SELECT id,pattern,layout,approved,payload FROM cases"
-        " WHERE payload LIKE ? ESCAPE '\\' AND split!='eval'"
+        "SELECT * FROM cases"
+        " WHERE (payload || COALESCE(correction,'')) LIKE ? ESCAPE '\\' AND split!='eval'"
         ' AND (approved=1 OR ?=1) LIMIT 20',
         ('%'+query+'%', int(include_candidates)))
-    return [dict(r) for r in rows]
+    out = []
+    for row in rows:
+        item = dict(row)
+        payload = json.loads(item['payload'])
+        payload['table'] = effective_table(row)
+        item['payload'] = encode(payload)
+        out.append(item)
+    return out

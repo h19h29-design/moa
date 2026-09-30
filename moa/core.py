@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo('Asia/Seoul')
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def kst_now() -> datetime:
@@ -156,6 +156,22 @@ class Store:
         CREATE TABLE IF NOT EXISTS review_queue(
           day TEXT NOT NULL, case_id TEXT NOT NULL, score INTEGER NOT NULL,
           reasons TEXT NOT NULL, PRIMARY KEY(day, case_id));
+        CREATE TABLE IF NOT EXISTS mobile_notices(
+          id TEXT PRIMARY KEY, origin_notice_id TEXT UNIQUE REFERENCES notices(id),
+          title TEXT NOT NULL, files TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'files_ready',
+          split TEXT NOT NULL DEFAULT 'train', latest_revision TEXT, approved_revision TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS mobile_revisions(
+          id TEXT PRIMARY KEY, notice_id TEXT NOT NULL REFERENCES mobile_notices(id),
+          sequence INTEGER NOT NULL, payload TEXT NOT NULL, html_sha TEXT NOT NULL,
+          created_at TEXT NOT NULL, UNIQUE(notice_id,sequence));
+        CREATE INDEX IF NOT EXISTS mobile_revisions_notice ON mobile_revisions(notice_id);
+        CREATE TABLE IF NOT EXISTS mobile_reviews(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          notice_id TEXT NOT NULL REFERENCES mobile_notices(id),
+          revision_id TEXT NOT NULL REFERENCES mobile_revisions(id),
+          action TEXT NOT NULL, reason TEXT NOT NULL, note TEXT NOT NULL,
+          reviewer TEXT NOT NULL, created_at TEXT NOT NULL);
         ''')
         self.db.execute('CREATE INDEX IF NOT EXISTS notices_campaign ON notices(campaign_id)')
         self.db.execute('CREATE INDEX IF NOT EXISTS cases_family ON cases(family_id)')

@@ -37,7 +37,7 @@ services:
 
   # 로컬 검수 화면. 같은 LAN(또는 SSH 터널)에서만 열리고, 공인/외부 포트를 만들지 않는다.
   # 접속: http://ds925-home.local:8321 (LAN) 또는 ssh -L 8321:localhost:8321 <NAS> 후 http://localhost:8321
-  # 변경(승인·수정·반려)은 MOA_REVIEW_TOKEN이 있어야만 동작한다.
+  # 업로드·원문·후보 HTML·다운로드·검수는 모두 로그인 필요.
   review:
     image: moa-notice-collector:local
     restart: unless-stopped
@@ -46,6 +46,7 @@ services:
     environment:
       MOA_DATA_DIR: /data
       TZ: Asia/Seoul
+      MOA_PUBLIC_URL: ${MOA_PUBLIC_URL:-https://moa.h19h19.com}
     command: ["serve", "--host", "0.0.0.0", "--port", "8321"]
     user: "${MOA_UID:-10001}:${MOA_GID:-10001}"
     volumes:
@@ -59,7 +60,7 @@ services:
       - /tmp:rw,noexec,nosuid,size=64m
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    mem_limit: 256m
+    mem_limit: 1g
     pids_limit: 64
     ports:
       - "8321:8321"

@@ -1,6 +1,6 @@
 """Local review web UI (stdlib only).
 
-Read pages are LAN-local; every mutation requires MOA_REVIEW_TOKEN.
+All document reads and writes require a session or an authenticated API request.
 Original HTML is never executed: the notice body is shown as plain text and
 attachments download with Content-Disposition: attachment + nosniff.
 """
@@ -12,12 +12,16 @@ import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlsplit
 
 from .core import Store, encode, kst_now
 from .extract import LAYOUTS
 from .learn import build_review_queue, effective_table, review
 from .render import render_mobile, render_page
+from .web_auth import AuthMixin
+from .web_mobile import MobileMixin
+from . import mobile
 
 DB_LOCK = threading.RLock()
 
@@ -49,7 +53,7 @@ PAGE = ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         '.hist{font-size:12px;color:#567}</style></head><body>')
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(AuthMixin, MobileMixin, BaseHTTPRequestHandler):
     store: Store = None
     token: str = ''
 
@@ -62,20 +66,37 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'self'; style-src 'unsafe-inline' 'self'")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(data)
 
     def _send_file(self, path, filename: str):
-        data = path.read_bytes()
+        return self._send_bytes(path.read_bytes(), filename)
+
+    def _security_headers(self):
+        self.send_header('Cache-Control','private, no-store')
+        self.send_header('X-Frame-Options','SAMEORIGIN')
+        self.send_header('Referrer-Policy','same-origin')
+        self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'")
+
+    def _send_bytes(self, data, filename, ctype='application/octet-stream', inline=False):
         self.send_response(200)
-        self.send_header('Content-Type', 'application/octet-stream')
+        self.send_header('Content-Type', ctype)
         self.send_header('Content-Disposition',
-                         "attachment; filename*=UTF-8''" + re.sub(r'[^\w.가-힣-]', '_', filename))
+                         ('inline' if inline else 'attachment')+"; filename*=UTF-8''" + quote(Path(filename).name,safe=''))
         self.send_header('X-Content-Type-Options', 'nosniff')
+        self._security_headers()
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _redirect(self, location, headers=None):
+        self.send_response(303)
+        self.send_header('Location',location)
+        self.send_header('Content-Length','0')
+        self._security_headers()
+        for k,v in (headers or {}).items(): self.send_header(k,v)
+        self.end_headers()
 
     # ---------------- GET ----------------
     def do_GET(self):
@@ -86,8 +107,27 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(urlsplit(self.path).query)
         path = urlsplit(self.path).path
         try:
+            if path == '/login':
+                return self._login_page()
+            if path == '/static/mobile.js':
+                return self._send(Path(__file__).with_name('mobile_ui.js').read_text(),ctype='text/javascript; charset=utf-8')
+            if not self._session():
+                return self._login_page('자료를 열려면 로그인하세요.',401)
             if path == '/':
+                return self._home()
+            if path == '/queue':
                 return self._queue()
+            if path == '/notice':
+                return self._notice(q.get('id',[''])[0],q.get('revision',[''])[0])
+            if path == '/mobile/preview':
+                return self._mobile_preview(q.get('id',[''])[0],q.get('revision',[''])[0])
+            if path == '/mobile/state':
+                row = mobile.notice_row(self.store,q.get('id',[''])[0])
+                return self._send(encode({'state':row['state'],'revision':row['latest_revision']}),ctype='application/json')
+            if path in ('/mobile/file','/mobile/original'):
+                return self._mobile_file(q.get('id',[''])[0],q.get('file',[''])[0],path=='/mobile/original')
+            if path in ('/mobile/html','/mobile/bundle'):
+                return self._mobile_download(q.get('id',[''])[0],path=='/mobile/bundle')
             if path == '/case':
                 return self._case(q.get('id', [''])[0], q.get('layout', [''])[0])
             if path == '/preview':
@@ -95,8 +135,10 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith('/obj/'):
                 return self._object(path.rsplit('/', 1)[-1])
             self._send('<p>404</p>', 404)
-        except Exception as exc:
-            self._send(PAGE + '<div class="card">오류: %s</div>' % esc(exc), 500)
+        except ValueError as exc:
+            self._send(self._page('<div class="card">'+esc(exc)+'</div>'),400)
+        except Exception:
+            self._send(self._page('<div class="card">자료를 처리하지 못했습니다. 다시 시도하세요.</div>'),500)
 
     def _queue(self):
         day = kst_now().date().isoformat()
@@ -124,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
                             esc(r['case_id'][:12]), esc(c['review_status']),
                             reasons, ''))
         head = ('<h2>MOA 우선검수 큐 — %s</h2><p class="muted">후보는 정답이 아닙니다. '
-                '원문과 대조·수정 후 승인하세요. <a href="/?all=1">전체 미검수</a></p>' % day)
+                '원문과 대조·수정 후 승인하세요. <a href="/queue?all=1">전체 미검수</a></p>' % day)
         if parse_qs(urlsplit(self.path).query).get('all'):
             extra = self.store.db.execute(
                 "SELECT id,payload FROM cases WHERE review_status='candidate'"
@@ -135,7 +177,7 @@ class Handler(BaseHTTPRequestHandler):
                              '<span class="muted">%s</span></div>'
                              % (esc(c['id']), esc(p.get('school', {}).get('school_name', '?')),
                                 esc(c['id'][:12])))
-        self._send(PAGE + head + ''.join(items))
+        self._send(self._page(head + ''.join(items)))
 
     def _case(self, case_id: str, layout_ovr: str = ''):
         row = self.store.db.execute('SELECT * FROM cases WHERE id=?', (case_id,)).fetchone()
@@ -172,13 +214,12 @@ class Handler(BaseHTTPRequestHandler):
         cur_layout = layout_ovr if layout_ovr in LAYOUTS else row['layout']
         layouts = ''.join('<option value="%s"%s>%s</option>'
                           % (l, ' selected' if l == cur_layout else '', l) for l in LAYOUTS)
-        form = ('<form method="post" action="/review">'
+        form = ('<form method="post" action="/review">'+self._csrf_field()+
                 '<input type="hidden" name="case_id" value="%s">'
                 '<div class="card"><b>검수</b><br>'
                 '검수자 <input name="reviewer" required> '
                 '레이아웃 <select name="layout">%s</select> '
-                '토큰 <input name="token" type="password" required '
-                'placeholder="MOA_REVIEW_TOKEN"><br>'
+                '<br>'
                 '<label><input type="checkbox" name="rights"> 이용권한 확인</label> '
                 '<label><input type="checkbox" name="privacy"> 개인정보 확인</label> '
                 '메모 <input name="note" size="30"><br>'
@@ -189,7 +230,7 @@ class Handler(BaseHTTPRequestHandler):
                 '<button class="bad" name="status" value="rejected">반려</button>'
                 '<button name="status" value="candidate">승인취소/재검수</button>'
                 '</div></form>')
-        html_doc = (PAGE + '<p><a href="/">← 큐</a></p>'
+        html_doc = (self._page('<p><a href="/queue">← 큐</a></p>') +
             '<div class="card"><b>%s</b> <span class="muted">%s · %s · 게시일 %s · %s</span><br>'
             '<a href="%s" target="_blank" rel="noopener">원문 페이지↗</a> · 상태 %s · family %s%s</div>'
             '<div class="cols"><div class="card"><b>원문(텍스트)</b><pre>%s</pre>'
@@ -211,6 +252,10 @@ class Handler(BaseHTTPRequestHandler):
         html_doc += form % (esc(case_id), layouts,
                             esc(json.dumps(table, ensure_ascii=False, indent=1)))
         html_doc += '<div class="card"><b>변경 이력</b>%s</div>' % (hist or '<div class="hist">없음</div>')
+        html_doc += ('<section class="card"><h2>안내 전체를 모바일로 변환</h2>'
+                     '<form action="/mobile/import" method="post">'+self._csrf_field()+
+                     '<input name="notice_id" type="hidden" value="%s">'
+                     '<button class="ok">안내·첨부 역할 확인 후 변환</button></form></section>') % esc(row['notice_id'])
         self._send(html_doc)
 
     def _preview(self, case_id: str, layout: str):
@@ -234,15 +279,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._post()
 
     def _post(self):
-        length = min(int(self.headers.get('Content-Length', 0)), 2 * 1024 * 1024)
-        form = parse_qs(self.rfile.read(length).decode('utf-8', 'replace'))
-        if urlsplit(self.path).path != '/review':
-            return self._send('<p>404</p>', 404)
-        if not self.token:
-            return self._send(PAGE + '<div class="card">MOA_REVIEW_TOKEN이 설정되지 않아 '
-                              '검수 변경이 잠겨 있습니다. NAS .env에 토큰을 추가하세요.</div>', 403)
-        if form.get('token', [''])[0] != self.token:
-            return self._send(PAGE + '<div class="card">토큰이 일치하지 않습니다.</div>', 403)
+        path = urlsplit(self.path).path
+        try:
+            length = int(self.headers.get('Content-Length',0))
+        except ValueError: return self._send('<p>잘못된 요청</p>',400)
+        limit = mobile.MAX_UPLOAD_BYTES+64*1024 if path in ('/upload','/mobile/add') else 4*1024*1024
+        if length <= 0 or length > limit or self.headers.get('Transfer-Encoding'):
+            return self._send('<p>요청 용량/형식 제한</p>',413)
+        if path != '/login' and not self._session():
+            return self._send('<p>로그인이 필요합니다.</p>',403)
+        self.connection.settimeout(30)
+        raw = self.rfile.read(length)
+        if len(raw)!=length: return self._send('<p>요청이 완료되지 않았습니다.</p>',400)
+        try:
+            if path in ('/upload','/mobile/add'): return self._upload(raw)
+            form = parse_qs(raw.decode('utf-8','strict'),keep_blank_values=True,max_num_fields=1000)
+            if path == '/login': return self._login(form)
+            if not self._csrf(form): return self._send('<p>요청 인증을 확인하세요.</p>',403)
+            if path == '/logout': return self._logout()
+            if path == '/mobile/import':
+                doc = self.store.notice(form.get('notice_id',[''])[0])
+                ident = mobile.register_collected(self.store,doc)
+                return self._redirect('/notice?id='+ident)
+            if path.startswith('/mobile/'):
+                return self._mobile_post(path,form)
+            if path != '/review': return self._send('<p>404</p>',404)
+        except (ValueError,KeyError) as exc:
+            return self._send(self._page('<p>'+esc(exc)+'</p>'),400)
+        except Exception:
+            return self._send(self._page('<p>처리하지 못했습니다. 입력 파일·내용을 확인하세요.</p>'),500)
         correction = None
         raw = form.get('correction', [''])[0].strip()
         if raw:
@@ -258,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
                             correction=correction,
                             rights_reviewed='rights' in form,
                             privacy_reviewed='privacy' in form)
-        except Exception as exc:
+        except ValueError as exc:
             return self._send(PAGE + '<div class="card">거부: %s</div>'
                               '<p><a href="/case?id=%s">돌아가기</a></p>'
                               % (esc(exc), esc(form.get('case_id', [''])[0])), 400)
@@ -270,12 +335,25 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(root, host='127.0.0.1', port=8321):
     store = Store(root, thread_safe=True)
+    mobile.queue_outdated(store)
     Handler.store = store
     Handler.token = os.environ.get('MOA_REVIEW_TOKEN', '')
     server = ThreadingHTTPServer((host, port), Handler)
+    stopped = threading.Event()
+    def worker():
+        with Store(root) as queue_store:
+            queue_store.db.execute("UPDATE jobs SET status='pending' WHERE kind='mobile' AND status='running'")
+            queue_store.db.commit()
+            while not stopped.is_set():
+                mobile.drain_mobile(queue_store)
+                stopped.wait(1)
+    worker_thread = threading.Thread(target=worker,daemon=True,name='moa-mobile-worker')
+    worker_thread.start()
     print(encode({'event': 'review_ui', 'listen': f'{host}:{port}',
                   'token_required': bool(Handler.token)}), flush=True)
     try:
         server.serve_forever()
     finally:
+        stopped.set()
+        worker_thread.join(timeout=3)
         store.db.close()

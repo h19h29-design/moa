@@ -565,7 +565,7 @@ def test_status_reports_today_dedup_and_review_state(tmp_path,capsys):
     assert cli(['--data',str(tmp_path),'status'])==0
     out=json.loads(capsys.readouterr().out)
     assert out['documents']==1 and out['documents_today']==1
-    assert out['unique_objects_on_disk']==1 and out['sightings']==1
+    assert out['unique_objects_on_disk']==2 and out['sightings']==1  # original asset + protected body HTML
     assert out['table_cases']==1 and out['review_pending_cases']==1 and out['approved']==0
 
 
@@ -890,7 +890,7 @@ def test_parser_version_change_reanalyses(tmp_path,monkeypatch):
             lambda *a,**k:SimpleNamespace(returncode=0,stdout=b'{"status":"extracted","text":"x","tables":[]}'))
         r1=extract_asset(s,a)
         assert r1['parser_version']==L.PARSER_VERSION
-        monkeypatch.setattr(L,'PARSER_VERSION','moa-local-v4')
+        monkeypatch.setattr(L,'PARSER_VERSION',L.PARSER_VERSION+'-next')
         calls=[]
         monkeypatch.setattr(subprocess,'run',
             lambda *a,**k:(calls.append(1),SimpleNamespace(returncode=0,
@@ -998,12 +998,18 @@ def test_review_web_requires_token_and_serves(tmp_path,monkeypatch):
     srv=ThreadingHTTPServer(('127.0.0.1',0),Handler)
     threading.Thread(target=srv.serve_forever,daemon=True).start()
     port=srv.server_address[1]
+    def authed(path, data=None):
+        return urllib.request.urlopen(urllib.request.Request(
+            f'http://127.0.0.1:{port}'+path,data,headers={'Authorization':'Bearer tok123'}))
     try:
-        page=urllib.request.urlopen(f'http://127.0.0.1:{port}/').read().decode()
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(f'http://127.0.0.1:{port}/')
+        assert denied.value.code==401
+        page=authed('/').read().decode()
         assert 'MOA' in page
-        case=urllib.request.urlopen(f'http://127.0.0.1:{port}/case?id={cid}').read().decode()
+        case=authed(f'/case?id={cid}').read().decode()
         assert '운동장' in case and '모바일 미리보기' in case
-        pv=urllib.request.urlopen(f'http://127.0.0.1:{port}/preview?id={cid}&layout=scroll_table').read().decode()
+        pv=authed(f'/preview?id={cid}&layout=scroll_table').read().decode()
         assert '운동장' in pv
         # POST without token -> 403
         data=urllib.parse.urlencode({'case_id':cid,'status':'approved','reviewer':'x'}).encode()
@@ -1023,7 +1029,7 @@ def test_review_web_requires_token_and_serves(tmp_path,monkeypatch):
         data=urllib.parse.urlencode({'case_id':cid,'status':'approved','reviewer':'검수자',
                                      'token':'tok123','rights':'1','privacy':'1',
                                      'layout':'key_value_cards'}).encode()
-        urllib.request.urlopen(f'http://127.0.0.1:{port}/review',data)
+        authed('/review',data)
         assert store.db.execute('select approved from cases').fetchone()[0]==1
     finally:
         srv.shutdown();store.db.close()
