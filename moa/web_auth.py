@@ -42,13 +42,29 @@ class AuthMixin:
         session = self._session()
         return '<input type="hidden" name="csrf" value="%s">' % (session['csrf'] if session else '')
 
+    def _review_context(self, form, action=''):
+        session = self._session()
+        if not session:
+            raise ValueError('로그인이 필요합니다.')
+        if session.get('api'):
+            reviewer = '인증 API'
+        else:
+            if not session.get('reviewer'):
+                session['reviewer'] = '웹 검수 '+secrets.token_hex(6)
+            reviewer = session['reviewer']
+        quick_approval = (not session.get('api') and action == 'approved'
+                          and form.get('review_mode', [''])[0] == 'quick')
+        note = form.get('note', [''])[0]
+        if quick_approval:
+            note = '빠른 승인: 원문 비교·이용 권한·개인정보 확인 완료.' + (' '+note if note else '')
+        return reviewer, note, quick_approval
+
     def _login_page(self, message='', status=200):
         from .web import PAGE,esc
         return self._send(PAGE+'<main class="card login"><h1>MOA</h1>'
             '<p>안내문 업로드·모바일 변환·검수</p><p>'+esc(message)+'</p>'
             '<form method="post" action="/login"><label>검수 암호'
             '<input type="password" name="password" autocomplete="current-password" required></label>'
-            '<label>검수자 이름 <input name="reviewer" autocomplete="name"></label>'
             '<button class="ok">로그인</button></form>'
             '<p class="muted">기존 MOA 검수 암호로 로그인합니다.</p></main>',status)
 
@@ -68,7 +84,7 @@ class AuthMixin:
         if len(self.sessions) >= 128: self.sessions.pop(next(iter(self.sessions)))
         sid = secrets.token_urlsafe(32)
         self.sessions[sid] = {'csrf':secrets.token_urlsafe(32),'expires':now+8*3600,
-                              'reviewer':form.get('reviewer',[''])[0][:80], 'api':False}
+                              'reviewer':'웹 검수 '+secrets.token_hex(6), 'api':False}
         secure = '; Secure' if self.headers.get('X-Forwarded-Proto') == 'https' or \
             urlsplit(os.environ.get('MOA_PUBLIC_URL','')).scheme == 'https' and \
             self.headers.get('Host','').split(':')[0] == urlsplit(os.environ.get('MOA_PUBLIC_URL','')).hostname else ''

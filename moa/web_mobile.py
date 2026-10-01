@@ -17,6 +17,7 @@ STYLE = ('label{display:block;margin:12px 0}label input:not([type=checkbox]),lab
          '.warning{background:#fff1df;padding:12px;border-radius:8px;color:#873a16}'
          '.preview{height:780px;max-width:440px;display:block;margin:auto}.original-img{width:100%;height:auto}'
          '.pill{background:#eef2f7;border-radius:15px;padding:3px 10px;font-size:13px}.actions{display:flex;gap:5px;flex-wrap:wrap}'
+         '.quick-actions{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}.quick-actions button{min-height:48px;font-size:18px;margin:0}'
          '.editor-block{border:1px solid #ddd;padding:10px;margin:12px 0;border-radius:8px}.editor-block textarea{min-height:70px;font:inherit;box-sizing:border-box}'
          '.cell-editor{display:grid;grid-template-columns:1fr auto;gap:8px;margin:10px 0}.cell-editor .coords{max-width:160px;font-size:12px}'
          '.coords input[type=number]{width:45px}.cell-editor label{margin:4px 0}.login{max-width:400px;margin:12vh auto}'
@@ -156,25 +157,29 @@ class MobileMixin:
                 '<details><summary>구조 JSON 직접 수정 (고급)</summary><textarea id="blocks" name="blocks">%s</textarea></details>'
                 '<button class="ok">수정 저장 후 재검토</button></form></details><script src="/static/mobile.js" defer></script>') % (
                     esc(ident),esc(rev['id']),esc(data['title']),esc(json.dumps(data['blocks'],ensure_ascii=False,indent=1)))
-            session = self._session() or {}
             reasons = ''.join('<option value="%s">%s</option>' % (key,esc(label)) for key,label in mobile.REASONS.items())
             content += ('<section class="card"><h2>4. 이 버전 검수</h2><form action="/mobile/review" method="post">'+self._csrf_field()+
                 '<input name="id" type="hidden" value="%s"><input name="revision" type="hidden" value="%s">'
-                '<label>검수자 <input name="reviewer" required value="%s"></label><label>보류·반려 사유 <select name="reason">%s</select></label>'
+                '<input name="review_mode" type="hidden" value="quick">'
+                '<p>내용이 맞으면 승인, 문제가 있거나 아직 확인하지 못했으면 보류하세요.</p>'
+                '<p class="muted">승인은 원문·표 관계·파일 역할·이용 권한·개인정보 확인 완료를 뜻합니다. 검수 번호와 시각은 자동 기록됩니다.</p>'
+                '<div class="quick-actions"><button name="action" value="approved" class="ok">승인</button>'
+                '<button name="action" value="held" class="hold">보류</button></div>'
+                '<details><summary>사유·메모 / 반려·승인취소 (선택)</summary>'
+                '<label>보류·반려 사유 <select name="reason">%s</select></label>'
                 '<label>메모 <textarea name="note" maxlength="2000" style="min-height:70px"></textarea></label>'
-                '<label><input type="checkbox" name="compared"> 원문과 안내 내용·표 관계·파일 역할을 대조함</label>'
-                '<label><input type="checkbox" name="rights"> 이용 권한 확인</label><label><input type="checkbox" name="privacy"> 개인정보 확인</label>'
-                '<div class="actions"><button name="action" value="approved" class="ok">승인</button>'
-                '<button name="action" value="held" class="hold">보류</button><button name="action" value="rejected" class="bad">반려</button>'
-                '<button name="action" value="candidate">승인취소 / 재검토</button></div></form>'
+                '<div class="actions"><button name="action" value="rejected" class="bad">반려</button>'
+                '<button name="action" value="candidate">승인취소 / 재검토</button></div></details></form>'
                 '<p class="muted">보류는 오답 확정이 아닙니다. 파일·내용 변경 시 새 버전을 다시 검수합니다.</p></section>') % (
-                    esc(ident),esc(rev['id']),esc(session.get('reviewer','')),reasons)
+                    esc(ident),esc(rev['id']),reasons)
         content += '<section class="card"><h2>HTML·첨부 이용</h2><p><a href="/mobile/html?id=%s">HTML 다운로드</a> · <a href="/mobile/bundle?id=%s">HTML + 실제 원본 파일 ZIP 다운로드</a></p><p class="muted">미검수 결과에는 미검수 표시가 유지됩니다. ZIP을 풀고 index.html을 열면 첨부도 함께 열립니다.</p></section>' % (esc(ident),esc(ident))
         content += '<section class="card"><h2>변경 이력</h2>'
         for history in self.store.db.execute('SELECT sequence,id,created_at FROM mobile_revisions WHERE notice_id=? ORDER BY sequence DESC',(ident,)):
             content += '<p><a href="/notice?id=%s&revision=%s">버전 %s</a> · %s</p>' % (esc(ident),esc(history['id']),history['sequence'],esc(history['created_at'][:19]))
         for history in self.store.db.execute('SELECT * FROM mobile_reviews WHERE notice_id=? ORDER BY id DESC',(ident,)):
-            content += '<p class="hist">%s · %s · %s · %s · %s</p>' % (esc(history['created_at'][:19]),esc(history['reviewer']),esc(history['action']),esc(mobile.REASONS[history['reason']]),esc(history['note']))
+            action_label = {'approved':'승인','held':'보류','rejected':'반려','candidate':'승인취소 / 재검토'}[history['action']]
+            reason = ' · '+esc(mobile.REASONS[history['reason']]) if history['action'] in ('held','rejected') else ''
+            content += '<p class="hist">%s · %s · %s%s · %s</p>' % (esc(history['created_at'][:19]),esc(history['reviewer']),esc(action_label),reason,esc(history['note']))
         self._send(self._page(content+'</section>'))
 
     def _mobile_file(self, ident, fid, original=False):
@@ -224,8 +229,11 @@ class MobileMixin:
         elif path == '/mobile/correct':
             mobile.correct(self.store,ident,rid,json.loads(form.get('blocks',[''])[0]),form.get('title',[''])[0])
         elif path == '/mobile/review':
-            mobile.decide(self.store,ident,rid,form.get('action',[''])[0],form.get('reviewer',[''])[0],
-                form.get('reason',['unconfirmed'])[0],form.get('note',[''])[0],
-                compared='compared' in form,rights='rights' in form,privacy='privacy' in form)
+            action = form.get('action',[''])[0]
+            reviewer, note, quick = self._review_context(form, action)
+            mobile.decide(self.store,ident,rid,action,reviewer,
+                form.get('reason',['unconfirmed'])[0],note,
+                compared=quick or 'compared' in form,rights=quick or 'rights' in form,
+                privacy=quick or 'privacy' in form)
         else: return self._send('<p>404</p>',404)
         return self._redirect('/notice?id='+ident)

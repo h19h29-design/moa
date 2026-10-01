@@ -68,7 +68,9 @@ class CorpusMixin:
             content+='<input name="id" type="hidden" value="%s"><input name="file" type="hidden" value="%s"><input name="fingerprint" type="hidden" value="%s">' % (esc(ident),esc(fid),esc(record['fingerprint']))
             content+='<div class="file-options"><label>파일 역할 <select name="role"><option value="convert"%s>안내 모바일 변환</option><option value="attachment"%s>원본 첨부 유지</option></select></label>' % (' selected' if role=='convert' else '', ' selected' if role=='attachment' else '')
             content+='<label>활용 분류 <select name="use">'+''.join('<option value="%s"%s>%s</option>' % (k,' selected' if k==result['use'] else '',esc(v)) for k,v in corpus.USES.items())+'</select></label></div>'
-            content+='<label>확인자 <input name="reviewer" required maxlength="80" value="%s"></label><label>분류 사유 <textarea name="note" maxlength="2000" style="min-height:70px"></textarea></label>' % esc((self._session() or {}).get('reviewer',''))
+            note_label = '분류 사유 (개인정보 후보 전환 시 필수)' if file['flags']['privacy_flag'] else '분류 사유 (선택)'
+            content+='<label>'+esc(note_label)+' <textarea name="note" maxlength="2000" style="min-height:70px"></textarea></label>'
+            content+='<p class="muted">확인자 이름 없이 접속별 검수 번호와 시각을 자동 기록합니다.</p>'
             if file['flags']['privacy_flag']:
                 content+='<label><input type="checkbox" name="privacy_checked"> 원문에서 개인정보 여부를 대조했음 (후보로 변경할 때 확인 결과 메모 필수)</label>'
             content+='<button>분류 저장 (승인 아님)</button></form></section>'
@@ -92,8 +94,9 @@ class CorpusMixin:
             raise ValueError('분류가 변경됐습니다. 최신 화면을 여세요.')
         if path=='/corpus/refresh':corpus.classify_notice(self.store,ident)
         elif path=='/corpus/decision':
+            reviewer, note, _ = self._review_context(form)
             corpus.decide_file(self.store,ident,form.get('file',[''])[0],fingerprint,
-                form.get('role',[''])[0],form.get('use',[''])[0],form.get('reviewer',[''])[0],
-                form.get('note',[''])[0],privacy_checked='privacy_checked' in form)
+                form.get('role',[''])[0],form.get('use',[''])[0],reviewer,
+                note,privacy_checked='privacy_checked' in form)
         else:return self._send('<p>404</p>',404)
         return self._redirect('/corpus/detail?'+urlencode({'id':ident}))

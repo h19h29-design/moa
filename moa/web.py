@@ -219,20 +219,21 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
                           % (l, ' selected' if l == cur_layout else '', l) for l in LAYOUTS)
         form = ('<form method="post" action="/review">'+self._csrf_field()+
                 '<input type="hidden" name="case_id" value="%s">'
-                '<div class="card"><b>검수</b><br>'
-                '검수자 <input name="reviewer" required> '
+                '<input type="hidden" name="review_mode" value="quick">'
+                '<div class="card"><b>검수</b>'
+                '<p>내용이 맞으면 승인, 문제가 있거나 아직 확인하지 못했으면 보류하세요.</p>'
+                '<p class="muted">승인은 원문·표 정확성·이용 권한·개인정보 확인 완료를 뜻합니다. 검수 번호와 시각은 자동 기록됩니다.</p>'
+                '<div class="quick-actions"><button class="ok" name="status" value="approved">승인</button>'
+                '<button class="hold" name="status" value="held">보류</button></div>'
+                '<details><summary>표 수정·메모 / 반려·승인취소 (선택)</summary>'
                 '레이아웃 <select name="layout">%s</select> '
                 '<br>'
-                '<label><input type="checkbox" name="rights"> 이용권한 확인</label> '
-                '<label><input type="checkbox" name="privacy"> 개인정보 확인</label> '
                 '메모 <input name="note" size="30"><br>'
                 '수정된 표 JSON(비우면 원본 유지):<br>'
                 '<textarea name="correction">%s</textarea><br>'
-                '<button class="ok" name="status" value="approved">승인</button>'
-                '<button class="hold" name="status" value="held">보류</button>'
                 '<button class="bad" name="status" value="rejected">반려</button>'
                 '<button name="status" value="candidate">승인취소/재검수</button>'
-                '</div></form>')
+                '</details></div></form>')
         html_doc = (self._page('<p><a href="/queue">← 큐</a></p>') +
             '<div class="card"><b>%s</b> <span class="muted">%s · %s · 게시일 %s · %s</span><br>'
             '<a href="%s" target="_blank" rel="noopener">원문 페이지↗</a> · 상태 %s · family %s%s</div>'
@@ -320,13 +321,14 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
             except json.JSONDecodeError as exc:
                 return self._send(PAGE + '<div class="card">수정 JSON 오류: %s</div>' % esc(exc), 400)
         try:
+            reviewer, note, quick = self._review_context(form, form['status'][0])
             result = review(self.store, form['case_id'][0], form['status'][0],
                             layout=form.get('layout', [None])[0] or None,
-                            reviewer=form.get('reviewer', [''])[0],
-                            note=form.get('note', [''])[0],
+                            reviewer=reviewer,
+                            note=note,
                             correction=correction,
-                            rights_reviewed='rights' in form,
-                            privacy_reviewed='privacy' in form)
+                            rights_reviewed=quick or 'rights' in form,
+                            privacy_reviewed=quick or 'privacy' in form)
         except ValueError as exc:
             return self._send(PAGE + '<div class="card">거부: %s</div>'
                               '<p><a href="/case?id=%s">돌아가기</a></p>'
