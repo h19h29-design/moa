@@ -5,6 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && groupadd -g 10001 moa && useradd -u 10001 -g moa -M moa
 COPY moa ./moa
+COPY contracts ./contracts
 USER 10001:10001
 ENTRYPOINT ["python", "-m", "moa"]
 CMD ["schedule"]

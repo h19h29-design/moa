@@ -1,13 +1,16 @@
 {
   "contract_version": "moa.worker.v1",
   "contract_hash": "a3b085c9b48e72418c6737f3da4f4d61a5d0bbba59a006be2e582271fb6da1fb",
-  "mini_ssh_alias": "moa-mini (set after Tailscale host + dedicated key confirmed)",
+  "mini_ssh_alias": "mac-mini@192.168.1.135 (same LAN; MacBook opens the tunnel, no Tailscale)",
+  "mini_user": "mac-mini",
   "mini_broker_bind": "127.0.0.1",
   "mini_broker_port": 8781,
   "macbook_tunnel_port": 18781,
   "worker_id": "macbook-laya-01",
   "worker_token_procedure": "The Mac mini operator generates MOA_WORKER_TOKEN server-side and hands it over through a separate safe channel (NOT chat, NOT this file). On the MacBook store it with mode 600, e.g. ~/.config/moa/worker-token (file containing the token only), or the login Keychain, and export MOA_WORKER_TOKEN at tunnel time.",
   "worker_token_local_path": "~/.config/moa/worker-token",
-  "setup_state": "awaiting_coordinator",
+  "setup_state": "relay_live_awaiting_macbook",
+  "relay_health": "127.0.0.1:8781 healthz 200, tokenless 401, token capabilities 200 verified 2026-10-17 (mini-local)",
+  "relay_runtime_note": "Relay runs from an internal copy at ~/.config/moa/moa-mini-relay.py (launchd cannot read the external SSD). Sync it from scripts/moa-mini-relay.py after edits.",
   "tunnel_example": "ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -L 127.0.0.1:18781:127.0.0.1:8781 moa-mini"
 }
