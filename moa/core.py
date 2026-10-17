@@ -15,7 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo('Asia/Seoul')
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def kst_now() -> datetime:
@@ -218,6 +218,13 @@ class Store:
                         self.db.execute('ALTER TABLE %s ADD COLUMN %s %s' % (table, name, decl))
             # Existing candidates keep their candidate status; approved flag dominates.
             self.db.execute("UPDATE cases SET review_status='approved' WHERE approved=1")
+            self.db.commit()
+        if version < 5:
+            # v5: worker relay + machine/human separation. Lazy-created by
+            # worker_api.ensure_worker_tables at runtime too; the DDL here
+            # guarantees the tables exist right after the versioned backup.
+            from .worker_api import WORKER_DDL
+            self.db.executescript(WORKER_DDL)
             self.db.commit()
 
     def backup(self, tag: str = 'manual') -> Path:
