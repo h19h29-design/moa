@@ -385,8 +385,12 @@ def review_suggestions(store, day=None):
             exception = m.get('rule_report', {}).get('status') != 'passed' or bool(m.get('model_context_exceptions'))
             for jid in m.get('model_job_ids', []):
                 evidence = store.db.execute('SELECT model_report FROM verification_evidence WHERE job_id=?', (jid,)).fetchone()
-                if evidence and evidence[0] and json.loads(evidence[0]).get('status') != 'completed':
-                    exception = True
+                if evidence and evidence[0]:
+                    report = json.loads(evidence[0])
+                    if report.get('status') != 'completed' or any(
+                            a.get('label') != 'preserved' or a.get('model_label',a.get('label')) != 'preserved'
+                            for a in report.get('answers',{}).values()):
+                        exception = True
             candidates.append({'mobile_id': row['mobile_id'], 'revision_id': row['revision_id'], 'exception': exception})
         rank = lambda item: sha((day + ':' + item['mobile_id']).encode())
         exceptions = sorted((c for c in candidates if c['exception']), key=rank)[:2]

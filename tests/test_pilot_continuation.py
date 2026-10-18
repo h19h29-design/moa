@@ -138,3 +138,16 @@ def test_refresh_reuses_only_automatic_new_parser_candidate_and_preserves_histor
         import pytest
         with pytest.raises(ValueError,match='changed'):
             pilot.prepare(s,[mid],refresh=True)
+
+
+def test_completed_inference_with_changed_or_insufficient_answers_is_review_exception(tmp_path):
+    with Store(tmp_path) as s:
+        ids=[document(s) for _ in range(3)];pilot.prepare(s,ids);ready(s)
+        for mid in ids:pilot.ingest_browser(s,browser_fixture(s,mid))
+        pilot.publish(s)
+        for mid,label in zip(ids,['changed','insufficient','preserved']):
+            s.db.execute('UPDATE verification_evidence SET model_report=? WHERE notice_id=? AND model_report IS NULL',
+                         (json.dumps({'status':'completed','answers':{'conditions':{'label':label,'model_label':label}}}),mid))
+        picked=pilot.review_suggestions(s,'2026-10-19')
+        assert {p['mobile_id'] for p in picked if p['reason']=='important_exception'} == set(ids[:2])
+        assert len(picked)==3
