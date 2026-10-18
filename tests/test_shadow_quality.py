@@ -42,3 +42,15 @@ def test_table_section_payload_uses_actual_dom_and_never_exposes_labels():
     assert parts[0]['payload']['questions'] == ['table_relations']
     assert 'expected' not in parts[0]['payload']
     assert not parts[0]['payload']['deterministic_findings']
+
+
+def test_new_evidence_decisions_keep_the_legacy_baseline_and_count_unrun_as_unmet():
+    report = quality.benchmark_metrics([
+        {'expected':'preserved','rule_label':'preserved','model_label':'changed',
+         'quality_label':'preserved','error':'identity'},
+        {'expected':'changed','rule_label':'changed','model_label':'preserved',
+         'quality_label':None,'error':'date'}])
+    assert report['combined']['accuracy'] == .5
+    assert report['evidence_combined']['accuracy_all'] == .5
+    assert report['evidence_combined']['coverage'] == .5
+    assert report['evidence_combined']['unrun'] == 1

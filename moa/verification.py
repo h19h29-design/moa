@@ -6,9 +6,58 @@ An extracted source is not a proof that the original parser covered the whole fi
 from __future__ import annotations
 
 import re
+import hashlib
+import json
+import unicodedata
 from collections import Counter
 
-GATE_VERSION = 'moa-content-gate-v2-structural'
+GATE_VERSION = 'moa-content-gate-v3-evidence'
+
+FORMATS = re.compile(
+    r'(?P<date>(?:20\d{2}\s*년\s*)?\d{1,2}\s*월\s*\d{1,2}\s*일|'
+    r'20\d{2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}\.?)'
+    r'|(?P<short_date>(?<![\d./-])\d{1,2}\s*[./]\s*\d{1,2}\.?(?!\d))'
+    r'|(?P<time>(?:오전|오후)?\s*\d{1,2}\s*시(?!간)\s*(?:\d{1,2}\s*분)?|(?<!\d)\d{1,2}:\d{2}(?!\d))'
+    r'|(?P<amount>(?<![\d.])[\d,]+(?:\.\d+)?\s*(?:만|천)?\s*원)'
+    r'|(?P<selection>(?<!\d)\d+\s*(?:개|과목))')
+
+
+def content_tokens(text, year=''):
+    """Canonical numeric presentation, preserving spaces between prose words.
+
+    Only explicitly recognized facts may change notation. Decimal values are
+    not month/day dates unless the surrounding text supplies date context.
+    """
+    text = unicodedata.normalize('NFC', str(text)).replace('\u00a0', ' ')
+    result, cursor = [], 0
+    def literal(value):
+        value = re.sub(r'\s+', ' ', value).strip()
+        if value:
+            result.append(('text', value))
+    for match in FORMATS.finditer(text):
+        kind, value = match.lastgroup, match.group().strip()
+        if kind == 'short_date':
+            context = re.search(r'(?:신청|마감|일정|일시|기간|접수|등록|개최|기한|날짜)\s*'
+                                r'(?:기간|일시|마감|일자)?\s*[:：]?\s*$', text[:match.start()])
+            if not context:
+                continue
+            kind = 'date'
+        literal(text[cursor:match.start()])
+        result.append((kind, normalise(value, year)))
+        cursor = match.end()
+    literal(text[cursor:])
+    return tuple(result)
+
+
+def _hash(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
+                                    separators=(',', ':')).encode()).hexdigest()
+
+
+def _proof_binding(report):
+    return _hash({key: report.get(key) for key in (
+        'gate_version', 'status', 'findings', 'expected_blocks', 'observed_blocks',
+        'source_complete', 'direct_comparison', 'source_inventory_sha256', 'render_observation_sha256')})
 
 
 def normalise(text: str, year: str = '', *, compact=True) -> str:
@@ -53,6 +102,7 @@ def department_links(rows):
     Two repeated triples and one flat triple share the same (ordinal, department,
     room) relations. Unknown layouts are NOT inferred from column counts.
     """
+    originals = rows
     rows = [[re.sub(r'\s+', '', str(c)) for c in row] for row in rows]
     departments, rooms, numbers = {'학과', '학과명'}, {'교실', '수업교실', '장소'}, {'연번', '번호'}
     for index, row in enumerate(rows):
@@ -63,8 +113,8 @@ def department_links(rows):
             width, numbered = 3, True
         else:
             continue
-        pairs, valid = [], True
-        for data in rows[index+1:]:
+        pairs, identity_pairs, valid = [], [], True
+        for row_index, data in enumerate(rows[index+1:], start=index+1):
             if not any(data):
                 continue
             if len(data) != len(row):
@@ -78,11 +128,13 @@ def department_links(rows):
                     valid = False
                     continue
                 pairs.append((str(int(group[0])) if numbered else '', group[-2], group[-1]))
+                original = originals[row_index][offset:offset+width]
+                identity_pairs.append((pairs[-1][0], content_tokens(original[-2]), content_tokens(original[-1])))
         keys = [p[0] if numbered else p[1] for p in pairs]
         valid &= bool(pairs) and len(keys) == len(set(keys))
-        return {'recognized': True, 'valid': bool(valid), 'pairs': pairs,
-                'preamble': ''.join(''.join(r) for r in rows[:index])}
-    return {'recognized': False, 'valid': False, 'pairs': [], 'preamble': ''}
+        return {'recognized': True, 'valid': bool(valid), 'pairs': pairs, 'identity_pairs': identity_pairs,
+                'preamble': '\n'.join(' '.join(str(c) for c in r if str(c).strip()) for r in originals[:index])}
+    return {'recognized': False, 'valid': False, 'pairs': [], 'identity_pairs': [], 'preamble': ''}
 
 
 def combine_verdict(rule_report, model_reports, *, browser_ok):
@@ -95,10 +147,29 @@ def combine_verdict(rule_report, model_reports, *, browser_ok):
         for answer in answers.values():
             raw = answer.get('model_label', answer.get('label'))
             labels.append(raw)
-            completed &= raw == 'preserved' and answer.get('label') == 'preserved'
-    passed = (rule_report.get('status') == 'passed' and not rule_report.get('findings') and
-              browser_ok and completed and bool(labels))
-    return {'status': 'passed' if passed else 'needs_review', 'rule_status': rule_report.get('status'),
+            completed &= raw in ('preserved', 'changed', 'insufficient')
+    findings = rule_report.get('findings', [])
+    hard = [f for f in findings if f.get('code') not in ('insufficient_evidence', 'source_inventory_invalid')]
+    proof = rule_report.get('identity_proof', {})
+    valid_proof = (proof.get('complete') is True and rule_report.get('source_complete') is True and
+                   proof.get('evidence_sha256') == _proof_binding(rule_report))
+    if hard:
+        quality, basis = 'changed', 'direct_mismatch'
+    elif rule_report.get('status') != 'passed' or findings or not browser_ok:
+        quality, basis = 'insufficient', 'incomplete_source_or_browser'
+    elif valid_proof:
+        quality, basis = 'preserved', 'verified_content_identity'
+    elif proof or not completed or not labels:
+        quality, basis = 'insufficient', 'identity_not_proven'
+    elif 'changed' in labels:
+        quality, basis = 'changed', 'model_alert_without_identity_proof'
+    elif 'insufficient' in labels:
+        quality, basis = 'insufficient', 'model_context_insufficient'
+    else:
+        quality, basis = 'insufficient', 'legacy_evidence_requires_fresh_comparison'
+    return {'status': 'passed' if quality == 'preserved' else 'needs_review',
+            'quality_label': quality, 'decision_basis': basis, 'model_complete': bool(completed),
+            'rule_status': rule_report.get('status'),
             'model_labels': labels, 'browser_ok': bool(browser_ok), 'mode': 'shadow_only',
             'human_approved': False, 'auto_pass_enabled': False, 'auto_publish_enabled': False}
 
@@ -141,7 +212,7 @@ def compare(sources: list, rendered: list, *, source_complete=True, attachments=
             fail('important_content_clipped', sid)
         years = re.findall(r'\b(20\d{2})\s*(?:년|[./-])', source.get('text', ''))
         year = years[0] if len(set(years)) == 1 else ''
-        norm = lambda text: normalise(text, year)
+        norm = lambda text: content_tokens(text, year)
         left_text = source.get('text', '')
         right_text = block.get('visible_text', '')
         if 'table_rows' in source:
@@ -157,9 +228,11 @@ def compare(sources: list, rendered: list, *, source_complete=True, attachments=
             expected = [[norm(c) for c in row] for row in source['table_rows']]
             actual = [[norm(c) for c in row] for row in block.get('table_rows', [])]
             original = source.get('original_table_rows', source['table_rows'])
+            original_expected = [[norm(c) for c in row] for row in original]
             src_links, dom_links = department_links(original), department_links(block.get('table_rows', []))
             link_match = (src_links['recognized'] and src_links['valid'] and dom_links['valid'] and
-                          Counter(src_links['pairs']) == Counter(dom_links['pairs']))
+                          Counter(src_links['pairs']) == Counter(dom_links['pairs']) and
+                          Counter(src_links['identity_pairs']) == Counter(dom_links['identity_pairs']))
             evidence['department_links'] = {'recognized': src_links['recognized'],
                 'expected_count': len(src_links['pairs']), 'observed_count': len(dom_links['pairs']),
                 'one_to_one_preserved': bool(link_match)}
@@ -167,20 +240,31 @@ def compare(sources: list, rendered: list, *, source_complete=True, attachments=
                 fail('department_classroom_mismatch', sid)
             # Only explicit repeated semantic triples may change shape. Keep the
             # generic row/merge/context gates for all other tables.
-            preamble_kept = not src_links['preamble'] or norm(src_links['preamble']) == norm(source.get('caption',''))
-            reflow = len(original) > 0 and any(len(row) == 6 for row in original) and link_match and preamble_kept
-            if expected != actual and not reflow:
+            raw_context = '\n'.join(filter(None, [source.get('original_caption', ''), src_links['preamble']]))
+            preamble_kept = not src_links['preamble'] or norm(raw_context) == norm(source.get('caption',''))
+            if 'original_caption' in source or src_links['preamble']:
+                if norm(raw_context) != norm(block.get('caption','')):
+                    fail('table_context_mismatch', sid, 'original_caption_or_preamble')
+            reflow = (len(original) > 0 and any(len(row) == 6 for row in original) and link_match
+                      and preamble_kept and not dom_links['preamble'])
+            if original_expected != actual and not reflow:
                 fail('table_relation_mismatch', sid)
             if source.get('table_geometry') != block.get('table_geometry') and source.get('table_geometry'):
                 fail('table_merge_mismatch', sid)
             for field in ('caption', 'note'):
                 if norm(source.get(field, '')) != norm(block.get(field, '')):
                     fail('table_context_mismatch', sid, field)
+            evidence['content_identity'] = original_expected == actual or reflow
             continue
         left, right = norm(source.get('text', '')), norm(block.get('visible_text', ''))
         if left != right:
             fail('content_or_condition_mismatch', sid)
-    return {'gate_version': GATE_VERSION, 'status': 'needs_review' if findings else 'passed',
+        evidence['content_identity'] = left == right
+    report = {'gate_version': GATE_VERSION, 'status': 'needs_review' if findings else 'passed',
             'findings': findings, 'expected_blocks': len(sources),
             'observed_blocks': len(rendered), 'source_complete': bool(source_complete),
-            'direct_comparison': direct}
+            'direct_comparison': direct, 'source_inventory_sha256': _hash(sources),
+            'render_observation_sha256': _hash(rendered)}
+    report['identity_proof'] = {'complete': not findings and bool(sources) and
+        all(e.get('content_identity') for e in direct), 'evidence_sha256': _proof_binding(report)}
+    return report

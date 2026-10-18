@@ -19,7 +19,7 @@ from .core import Store, digest, encode, kst_now, write_jsonl
 from .extract import LAYOUTS, PARSER_VERSION, detect_kind, html_document, table_pattern
 from .render import CSS, render_mobile, render_page
 
-CONVERTER_VERSION = 'moa-notice-v3-masthead-flow'
+CONVERTER_VERSION = 'moa-notice-v4-table-context'
 ROLES = ('convert', 'attachment')
 REASONS = {'unconfirmed': '아직 미확인', 'missing': '내용 누락',
            'table': '표 관계 오류', 'readability': '읽기 불편',
@@ -269,7 +269,8 @@ def repeated_columns(table: dict) -> tuple[dict, str]:
     labels = [by_row[header_row][c]['text'] for c in range(3)]
     cells = [{'row':r,'col':c,'rowspan':1,'colspan':1,'text':text,'header':r==0}
              for r,row in enumerate([labels,*data]) for c,text in enumerate(row)]
-    caption = '\n'.join(c['text'] for c in table['cells'] if c['row'] < header_row and c['text'])
+    caption = '\n'.join(filter(None, [table.get('caption', ''),
+        '\n'.join(c['text'] for c in table['cells'] if c['row'] < header_row and c['text'])]))
     return {'rows':len(data)+1,'cols':3,'cells':cells,'source':table.get('source'),
             'caption':caption,'geometry_uncertain':False}, 'repeated-columns-v1'
 

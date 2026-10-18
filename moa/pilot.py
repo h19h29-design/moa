@@ -64,6 +64,7 @@ def source_inventory(store, data):
             elif b['type'] == 'table':
                 table, rule = mobile.repeated_columns(copy.deepcopy(b['table']))
                 source.update(table_rows=table_rows(table), original_table_rows=table_rows(b['table']),
+                              original_caption=b['table'].get('caption', ''),
                               caption=table.get('caption', ''), note='')
                 source['text'] = '\n'.join(' / '.join(row) for row in source['table_rows'])
                 if source['caption']:

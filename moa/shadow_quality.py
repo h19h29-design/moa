@@ -43,14 +43,19 @@ def benchmark_metrics(records):
         if 'changed' in (a, b): return 'changed'
         if 'insufficient' in (a, b): return 'insufficient'
         return 'preserved' if a == b == 'preserved' else None
-    for name, predict in (('rules', lambda r: r['rule_label']),
-                          ('model', lambda r: r['model_label']), ('combined', combined)):
+    scorers = [('rules', lambda r: r['rule_label']),
+               ('model', lambda r: r['model_label']), ('combined', combined)]
+    if any('quality_label' in r for r in valid):
+        scorers.append(('evidence_combined', lambda r: r.get('quality_label')))
+    for name, predict in scorers:
         measured = [(r, predict(r)) for r in valid]
         errors = [(r, p) for r, p in measured if r['expected'] == 'changed']
         normal = [(r, p) for r, p in measured if r['expected'] == 'preserved']
         ran = [(r, p) for r, p in measured if p is not None]
         out[name] = {'evaluated': len(ran), 'unrun': len(measured)-len(ran),
             'accuracy': sum(p == r['expected'] for r,p in ran)/len(ran) if ran else None,
+            'accuracy_all': sum(p == r['expected'] for r,p in ran)/len(valid) if valid else None,
+            'coverage': len(ran)/len(valid) if valid else None,
             'errors': len(errors), 'changed_detected': sum(p == 'changed' for _,p in errors),
             'changed_recall': sum(p == 'changed' for _,p in errors)/len(errors) if errors else None,
             'unsafe_false_preserved': sum(p == 'preserved' for r,p in measured if r['expected'] != 'preserved'),
