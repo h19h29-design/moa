@@ -315,7 +315,7 @@ def test_browser_session_upload_csrf_and_named_attachment_download(web):
     response=browser.open(base+'/mobile/file?id='+ident+'&file=1')
     assert response.read()==b'original form'
     assert 'filename*=UTF-8' in response.headers['Content-Disposition']
-    assert response.headers['Cache-Control']=='private, no-store'
+    assert response.headers['Cache-Control']=='private, no-store, no-transform'
     with pytest.raises(urllib.error.HTTPError) as denied:
         browser.open(base+'/mobile/generate',urllib.parse.urlencode({'id':ident,'revision':''}).encode())
     assert denied.value.code==403

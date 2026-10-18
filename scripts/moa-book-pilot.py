@@ -27,6 +27,13 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+def claimed_job(response):
+    if response is None: return None
+    if not isinstance(response, dict) or response.get('ok') is not True or not isinstance(response.get('job'), dict):
+        raise ValueError('invalid_claim_response_wrapper')
+    return response['job']
+
+
 def identity():
     from workers.laya_local import policy, ml, runtime
     return digest(b''.join(Path(f).read_bytes() for f in (__file__, policy.__file__, ml.__file__, runtime.__file__)))
@@ -181,7 +188,7 @@ def main():
     for _ in range(args.max_jobs):
         if time.monotonic() - started >= args.max_seconds: break
         if not runtime.resources()['verify_allowed']: break
-        job = client.call('/v1/worker/claim', {'worker_id': client.worker, 'kinds': ['verify'], 'worker_code_sha256': client.code})
+        job = claimed_job(client.call('/v1/worker/claim', {'worker_id': client.worker, 'kinds': ['verify'], 'worker_code_sha256': client.code}))
         if not job: break
         print(json.dumps(client.verify(job, agent)), flush=True)
 
@@ -189,5 +196,9 @@ def main():
 if __name__ == '__main__':
     try: main()
     except Exception as error:
-        print(json.dumps({'error': type(error).__name__, 'reason': 'bounded_pilot_stopped'}), file=sys.stderr)
+        import re
+        detail = str(error)
+        safe_reason = detail if re.fullmatch(r'[a-z0-9_:-]{1,120}', detail) else 'bounded_pilot_stopped'
+        print(json.dumps({'error': type(error).__name__, 'reason': safe_reason,
+                          'http_status': error.code if isinstance(error, urllib.error.HTTPError) else None}), file=sys.stderr)
         raise SystemExit(1)

@@ -78,7 +78,7 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, WorkerMixin, BaseHTTPRequestH
         return self._send_bytes(path.read_bytes(), filename)
 
     def _security_headers(self):
-        self.send_header('Cache-Control','private, no-store')
+        self.send_header('Cache-Control','private, no-store, no-transform')
         self.send_header('X-Frame-Options','SAMEORIGIN')
         self.send_header('Referrer-Policy','same-origin')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'")

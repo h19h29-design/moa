@@ -18,6 +18,8 @@ def test_book_raw_labels_and_probabilities_are_not_replaced_by_rule_labels(monke
         monkeypatch.setitem(sys.modules, key, value)
     spec = importlib.util.spec_from_file_location('book_adapter', Path(__file__).parents[1] / 'scripts/moa-book-pilot.py')
     mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    assert mod.claimed_job({'ok': True, 'job': {'job_id': 'synthetic'}}) == {'job_id': 'synthetic'}
+    assert mod.claimed_job(None) is None
     local = {'status': 'completed', 'criteria': {'conditions': {'label': 'preserved', 'model_label': 'preserved',
              'raw_distribution': {'preserved': .8, 'changed': .1, 'insufficient': .1}, 'actual_tokens': 123}},
              'coverage': {'source_ids': ['s1'], 'render_ids': ['r1'], 'missing_context_ids': []},
