@@ -304,6 +304,19 @@ def test_new_handoff_and_readiness_routes_remain_authenticated(store, monkeypatc
             assert request(base, '/v1/worker/training-receipt', {}, headers)[0] == 400
 
 
+def test_real_review_handler_dispatches_handoff_to_worker_not_browser_login(store):
+    from moa.web import Handler
+    class Review(Handler):
+        token = 'synthetic-review-password'
+        worker_token = 'synthetic-worker-token'
+    Review.store = store
+    with serving(Review) as base:
+        code, raw = request(base, '/v1/worker/handoff')
+        assert code == 401 and json.loads(raw)['error'] == 'worker unauthorized'
+        code, raw = request(base, '/v1/worker/handoff', headers={'Authorization': 'Bearer ' + Review.worker_token})
+        assert code == 200 and json.loads(raw)['questions_revision'] == 'moa.ko.section.v1'
+
+
 def test_concurrent_publication_creates_only_one_job_and_route(store):
     from concurrent.futures import ThreadPoolExecutor
     barrier = threading.Barrier(2)

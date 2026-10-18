@@ -115,7 +115,7 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, WorkerMixin, BaseHTTPRequestH
                 return self._login_page()
             if path == '/static/mobile.js':
                 return self._send(Path(__file__).with_name('mobile_ui.js').read_text(),ctype='text/javascript; charset=utf-8')
-            if path == '/v1/worker/capabilities' or path.startswith('/v1/worker/artifacts/'):
+            if path.startswith('/v1/worker/'):
                 return self._worker_get(path, q)
             if not self._session():
                 return self._login_page('자료를 열려면 로그인하세요.',401)
