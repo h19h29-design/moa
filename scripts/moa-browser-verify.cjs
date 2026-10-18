@@ -100,9 +100,17 @@ async function main(){
         item.files.every(f=>htmlBody.includes(Buffer.from(f.filename)));
       const bundle=await context.request.get(args.base+'/mobile/bundle?id='+item.mobile_id);
       if(bundle.status()===200){
-        const entries=JSON.parse(execFileSync('python3',['-c',
-          "import sys,io,zipfile,hashlib,json;z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()));print(json.dumps({n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist()}))"],
-          {input:await bundle.body(),encoding:'utf8',maxBuffer:1024*1024}));
+        // Large stdin buffers can stall the synchronous Node/Python pipe on
+        // macOS. A private, bounded temporary file avoids that transport stall.
+        const scratch=fs.mkdtempSync(path.join(args.output,'.bundle-'));
+        let entries;
+        try{
+          const archive=path.join(scratch,'download.zip');
+          fs.writeFileSync(archive,await bundle.body(),{mode:0o600});
+          entries=JSON.parse(execFileSync('python3',['-c',
+            "import sys,zipfile,hashlib,json;z=zipfile.ZipFile(sys.argv[1]);print(json.dumps({n:hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist()}))",archive],
+            {encoding:'utf8',maxBuffer:1024*1024,timeout:15000}));
+        }finally{fs.rmSync(scratch,{recursive:true,force:true});}
         result.bundle_download_verified=Boolean(entries['index.html']) && item.files.every(f=>
           entries['attachments/'+f.sha256.slice(0,12)+'-'+f.filename.replace(/[\\/\x00-\x1f]/g,'_')]===f.sha256);
       }else result.bundle_download_verified=false;
@@ -122,4 +130,7 @@ async function main(){
     console.log(JSON.stringify({login_verified:true,documents:results}));
   }finally{await context.close();await browser.close();}
 }
-main().catch(e=>{console.error(JSON.stringify({error:e.name,message:e.message.split('\n')[0]}));process.exit(1)});
+module.exports = {snapshot};
+if (require.main === module) main().catch(e=>{
+  console.error(JSON.stringify({error:e.name,message:e.message.split('\n')[0]}));process.exit(1);
+});

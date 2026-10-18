@@ -1114,5 +1114,8 @@ def test_hwp_table_cells_and_spans():
     assert t['rows'] == 2 and t['cols'] == 2 and len(t['cells']) == 3
     assert t['cells'][0]['colspan'] == 2 and '제목' in t['cells'][0]['text']
     assert t['cells'][1]['text'].startswith('가항목')
-    assert _hwp_text('\x0bOCR어쩌구\x00\x00\x00\x00\x00\x00\x0b\x00'.encode('utf-16-le')
+    # HWP 5.0 inline/extended controls are 8 WCHARs: marker + 6 + marker.
+    # The old fixture incorrectly added six more NUL WCHARs and rewarded a
+    # variable-length skip that could consume real Korean text.
+    assert _hwp_text('\x0bOCR어쩌구\x0b'.encode('utf-16-le')
                      + '본문'.encode('utf-16-le')) == '본문'

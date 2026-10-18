@@ -26,7 +26,11 @@ def _grid(table: dict) -> list:
 
 def _raw_table(table: dict) -> str:
     """The complete table, merged cells preserved. Always available as fallback."""
-    out = ['<table class="moa-raw"><tbody>']
+    # Korean may wrap between every character. Keep wide/merged tables readable
+    # inside their existing horizontal scroll container instead of squeezing all
+    # columns into the phone width. Content and merge relationships stay intact.
+    minimum = max(1, min(200, int(table.get('cols', 1)))) * 80
+    out = ['<table class="moa-raw" style="min-width:%dpx"><tbody>' % minimum]
     for row in _grid(table):
         out.append('<tr>')
         for cell in row:

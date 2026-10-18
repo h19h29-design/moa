@@ -19,7 +19,7 @@ from .core import Store, digest, encode, kst_now, write_jsonl
 from .extract import LAYOUTS, PARSER_VERSION, detect_kind, html_document, table_pattern
 from .render import CSS, render_mobile, render_page
 
-CONVERTER_VERSION = 'moa-notice-v4-table-context'
+CONVERTER_VERSION = 'moa-notice-v7-readable-tables'
 ROLES = ('convert', 'attachment')
 REASONS = {'unconfirmed': '아직 미확인', 'missing': '내용 누락',
            'table': '표 관계 오류', 'readability': '읽기 불편',
@@ -176,8 +176,21 @@ def explicit_blank_form(table: dict) -> bool:
     if not any(re.fullmatch(r'[\w가-힣·ㆍ()\-]{0,70}(?:신청서|동의서)', text) for text in top):
         return False
     text = re.sub(r'\s+', '', ' '.join(c['text'] for c in cells))
-    fields = sum(label in text for label in ('성명', '보호자', '연락처', '서명', '생년월일', '계좌번호'))
-    return fields >= 3 and sum(not c['text'].strip() for c in cells) >= 2
+    fields = sum(label in text for label in ('성명', '보호자', '연락처', '서명', '생년월일', '계좌번호', '신청자명'))
+    return fields >= 2 and sum(not c['text'].strip() for c in cells) >= 2
+
+
+def form_instruction(block: dict) -> bool:
+    """Keep explicit submission directions even when printed below a form title.
+
+    Filled fields and consent boilerplate stay in the original attachment. This
+    does not confirm an ambiguous form boundary or authorize human approval.
+    """
+    if block['type'] != 'paragraph':
+        return False
+    text = block.get('text', '')
+    return bool(re.search(r'(?:제출|회신)', text) and
+                re.search(r'(?:기한|마감|까지|제출\s*(?:장소|방법|처)|회신\s*방법)', text))
 
 
 def masthead_layout(table: dict) -> bool:
@@ -350,7 +363,8 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
                 text = b.get('text','')
                 if b['type'] == 'table':
                     text = ' '.join(c['text'] for c in b['table'].get('cells',[]))
-                    form = sum(word in text for word in ('지원자','성명','보호자','서명','신청자')) >= 3
+                    form = explicit_blank_form(b['table']) or \
+                        sum(word in text for word in ('지원자','성명','보호자','서명','신청자')) >= 3
                 else:
                     form = bool(FORM_TITLE.fullmatch(text.strip()))
                 if form:
@@ -370,7 +384,7 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
                              'message':f'안내/서식 경계 후보는 구역 {form_at}입니다. 원문 대조 후 경계를 확인하세요.'})
         for i,b in enumerate(content):
             b.update(id=f"{file['id']}:{i}",file_id=file['id'],source_block=i)
-            if form_at is not None and i >= form_at:
+            if form_at is not None and i >= form_at and not form_instruction(b):
                 excluded.append({'reason':'form','file_id':file['id'],'source_block':i,'block':b})
                 continue
             if b['type'] == 'table':
