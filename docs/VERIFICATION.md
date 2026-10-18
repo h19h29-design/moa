@@ -1,5 +1,31 @@
 # 검증 기록 — 2026-09-23 (3단계)
 
+# 추가 기록 — 2026-10-18 (합성 verify 단건 접속)
+
+- 원격/로컬 HEAD 137c230 및 NAS 대상 모듈 일치를 확인하고 이어서 수정.
+  계약 JSON Schema 바이트/해시 a3b085c9b48e…는 변경하지 않았다.
+- result가 job의 입력 해시를 echo하도록 검증을 고치고, 저장된 리비전/현재 lease/정확한
+  fencing/worker를 대조. stale 제출은 accepted-result idempotency를 막지 않는 별도 이력에 저장.
+- 1MiB immutable JSON artifact와 작업별 연결/대상 worker를 추가. 현재 lease 헤더와
+  토큰이 모두 있어야 다운로드 가능. 서버/맥북에서 source manifest의 블록 해시를 확인.
+- 중계 경로/헤더 허용 목록, 응답 크기 상한, redirect 차단, 빈 본문 204, inline complete ack.
+- 완료된 작업과 품질 판정/사람 승인을 구분. 합성 작업은 실자료 notice에 연결하지 않음.
+- `python -m pytest -q`: **207 passed**. compileall, JS 구문, 설치 셸, diff 검사 통과.
+  합성 HTTP 테스트가 실제 중계 코드를 통과하며 claim/artifact/heartbeat/complete/duplicate 확인.
+  실제 모델을 실행한 테스트는 아니다.
+- NAS 백업 `/volume2/moa/data/deploy-backups/verify-20261018T125133/`:
+  앱/환경설정 아카이브와 온라인 SQLite 백업. 사전/사후 quick_check=ok.
+  .env 바이트/600 권한, 기존 원문/승인 자료 보존. additive worker 테이블만 추가.
+- review를 `up -d --no-deps review`로 배포. collector는 기존 이미지와 시작 시각 유지.
+  이전 이미지 태그 `moa-notice-collector:pre-verify-20261018-125133` 보존.
+- 미니 LaunchAgent 중계 127.0.0.1:8781 갱신 후 health 200/무토큰 401/토큰 capabilities 200.
+  계약 일치. artifact 무토큰 401/lease 없는 인증 요청 409. 공개 포트/다른 NAS 서비스 변경 없음.
+- 합성 job `job-synthetic-verify-20261018-01` 1개와 source manifest artifact 1개 발행.
+  발행 직후 pending, 결과/이벤트 0. 실자료 machine_checks/mobile_reviews 0.
+- 미검증: 변경 계약을 적용한 맥북 워커의 실제 claim→heartbeat→complete 및 LAYA 판정.
+  맥북 전달 내용은 [접속 합의/실행 지시](WORKER_VERIFY_HANDOFF_20261018.md).
+- 외부 AI 호출/유료 fallback/훈련/운영 승격 없음. 실제 문서나 비밀을 Git에 포함하지 않음.
+
 # 추가 기록 — 2026-10-01 (이름 없이 빠른 승인·보류)
 
 - 로그인·모바일 검수·기존 자료 분류·표 사례에서 이름 입력 제거. 기본 검수 동작은 큰 승인/보류 두 버튼.

@@ -3,6 +3,7 @@
 Synthetic fixtures only — no real notices, approvals, or network calls.
 """
 import json
+import hashlib
 import tempfile
 from pathlib import Path
 from moa import worker_api, worker_contract as wc
@@ -116,8 +117,9 @@ def test_train_lineage_fail_closed():
 
 
 def test_lease_and_fencing_logic():
-    assert wc.fencing_ok(3, 3) and wc.fencing_ok(3, 4) and not wc.fencing_ok(3, 2)
+    assert wc.fencing_ok(3, 3) and not wc.fencing_ok(3, 4) and not wc.fencing_ok(3, 2)
     assert wc.lease_expired(100.0, 90.0) and not wc.lease_expired(80.0, 90.0)
+    assert wc.lease_expired(90.0, 90.0)
 
 
 def _store():
@@ -126,28 +128,37 @@ def _store():
 
 
 def _claimed_job(store):
-    assert worker_api.enqueue_job(store, make_env())["ok"]
+    payload = dict(VERIFY_PAYLOAD, notice_id="notice-synth-1")
+    manifest = {"source_revision": "src-r1", "scope": "section", "complete": True,
+                "block_sha256": {b["id"]: hashlib.sha256(b["text"].encode()).hexdigest()
+                                 for b in payload["source_blocks"]}}
+    payload["source_manifest_artifact"] = worker_api.put_artifact(store, wc.canonical(manifest))
+    assert worker_api.enqueue_job(store, make_env(payload=payload))["ok"]
     job = worker_api.claim(store, "macbook-laya-01", ["verify"])
     assert job and job["lease_id"].startswith("lease-")
     return job
 
 
 def _result_for(job, verdict="completed"):
-    payload = {"verdict": verdict, "validator_hash": worker_api.validator_hash(),
-               "notice_id": "notice-synth-1"}
+    payload = {"status": verdict, "validator_hash": worker_api.validator_hash(),
+               "checkpoint_sha256": "a" * 64, "model_revision": "synthetic-test-model",
+               "tokenizer_revision": "synthetic-test-tokenizer", "calibration_revision": "synthetic-test-calibration",
+               "answers": {q: {"label": "preserved", "raw_probabilities": {"preserved": 0.8, "changed": 0.1, "insufficient": 0.1},
+                               "calibrated_probabilities": {"preserved": 0.8, "changed": 0.1, "insufficient": 0.1}, "calibrated": True}
+                           for q in job["payload"]["questions"]},
+               "inspected_source_ids": [b["id"] for b in job["payload"]["source_blocks"]],
+               "inspected_render_ids": [b["id"] for b in job["payload"]["rendered_blocks"]],
+               "missing_context_ids": [], "actual_tokens": 80, "truncation": False,
+               "warnings": ["SYNTHETIC_TEST_NOT_A_MODEL_RUN"]}
     return {
         "contract_version": wc.CONTRACT_VERSION,
         "message_type": "result",
         "job_id": job["job_id"],
         "job_kind": job["job_kind"],
-        "idempotency_key": wc.make_idempotency_key(
-            job["job_kind"], payload, job["source_revision"],
-            job["render_revision"], job["rubric_revision"]),
+        "idempotency_key": job["idempotency_key"],
         "lease_id": job["lease_id"],
         "fencing_token": job["fencing_token"],
-        "input_sha256": wc.input_sha256(
-            job["job_kind"], payload, job["source_revision"],
-            job["render_revision"], job["rubric_revision"]),
+        "input_sha256": job["input_sha256"],
         "source_revision": job["source_revision"],
         "render_revision": job["render_revision"],
         "rubric_revision": job["rubric_revision"],
@@ -158,12 +169,12 @@ def _result_for(job, verdict="completed"):
 def test_claim_heartbeat_complete_records_machine_not_human():
     store = _store()
     job = _claimed_job(store)
-    hb = worker_api.heartbeat(store, job["job_id"], job["lease_id"])
+    hb = worker_api.heartbeat(store, job["job_id"], job["lease_id"], fencing_token=job["fencing_token"], worker_id="macbook-laya-01")
     assert hb["ok"]
-    res = worker_api.complete(store, _result_for(job), worker_api.validator_hash())
-    assert res["ok"] and res["verdict"] == "completed"
+    res = worker_api.complete(store, _result_for(job), worker_api.validator_hash(), worker_id="macbook-laya-01")
+    assert res["ok"] and res["verdict"] == "machine_passed"
     machine = worker_api.machine_state(store, "notice-synth-1")
-    assert machine and machine["verdict"] == "completed"
+    assert machine and machine["verdict"] == "machine_passed"
     # Human approval surfaces untouched by worker completion.
     assert store.db.execute("SELECT count(*) FROM mobile_reviews").fetchone()[0] == 0
     assert store.db.execute(
@@ -174,8 +185,8 @@ def test_claim_heartbeat_complete_records_machine_not_human():
 def test_duplicate_complete_is_idempotent():
     store = _store()
     job = _claimed_job(store)
-    first = worker_api.complete(store, _result_for(job), worker_api.validator_hash())
-    second = worker_api.complete(store, _result_for(job), worker_api.validator_hash())
+    first = worker_api.complete(store, _result_for(job), worker_api.validator_hash(), worker_id="macbook-laya-01")
+    second = worker_api.complete(store, _result_for(job), worker_api.validator_hash(), worker_id="macbook-laya-01")
     assert first["ok"] and second.get("duplicate")
     assert store.db.execute("SELECT count(*) FROM machine_checks").fetchone()[0] == 1
 
@@ -185,12 +196,7 @@ def test_wrong_lease_result_is_stale_and_unmerged():
     job = _claimed_job(store)
     bad = _result_for(job)
     bad["lease_id"] = "lease-stale"
-    # Re-hash so the envelope itself stays valid; only the lease is wrong.
-    bad["input_sha256"] = wc.input_sha256(
-        bad["job_kind"], bad["payload"], bad["source_revision"],
-        bad["render_revision"], bad["rubric_revision"])
-    bad["idempotency_key"] = bad["input_sha256"]
-    res = worker_api.complete(store, bad, worker_api.validator_hash())
+    res = worker_api.complete(store, bad, worker_api.validator_hash(), worker_id="macbook-laya-01")
     assert res.get("stale")
     assert store.db.execute("SELECT count(*) FROM machine_checks").fetchone()[0] == 0
 
@@ -201,7 +207,7 @@ def test_expired_lease_requeues_on_heartbeat():
     store.db.execute("UPDATE worker_jobs SET lease_expires_at=1 WHERE job_id=?",
                      (job["job_id"],))
     store.db.commit()
-    res = worker_api.heartbeat(store, job["job_id"], job["lease_id"])
+    res = worker_api.heartbeat(store, job["job_id"], job["lease_id"], fencing_token=job["fencing_token"], worker_id="macbook-laya-01")
     assert not res["ok"] and "expired" in res["error"]
 
 
@@ -210,7 +216,7 @@ def test_fail_retryable_bumps_fencing():
     job = _claimed_job(store)
     before = store.db.execute("SELECT fencing_token FROM worker_jobs WHERE job_id=?",
                               (job["job_id"],)).fetchone()[0]
-    res = worker_api.fail(store, job["job_id"], job["lease_id"], "OOM", True)
+    res = worker_api.fail(store, job["job_id"], job["lease_id"], "OOM", True, fencing_token=job["fencing_token"], worker_id="macbook-laya-01")
     after = store.db.execute("SELECT fencing_token, status FROM worker_jobs WHERE job_id=?",
                              (job["job_id"],)).fetchone()
     assert res["ok"] and after["status"] == "pending" and after["fencing_token"] > before
@@ -219,7 +225,7 @@ def test_fail_retryable_bumps_fencing():
 def test_validator_change_rejects_merge():
     store = _store()
     job = _claimed_job(store)
-    res = worker_api.complete(store, _result_for(job), "deadbeef" * 8)
+    res = worker_api.complete(store, _result_for(job), "deadbeef" * 8, worker_id="macbook-laya-01")
     assert res.get("stale")
     assert store.db.execute("SELECT count(*) FROM machine_checks").fetchone()[0] == 0
 

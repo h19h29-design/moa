@@ -45,10 +45,14 @@ pull worker다. SMB로 운영 SQLite를 직접 열지 않는다.
 - 토큰은 Authorization 헤더 전용. 서버 시각 lease, fencing token,
   idempotency 중복 무시, 오래된 결과는 stale 기록·미반영.
 - 연결 파일 MOA_MACBOOK_CONNECTION.json에는 비밀을 넣지 않는다.
+- 2026-10-18 verify의 정식 식별자·artifact lease 헤더·inline ack·합성 단건 발행은
+  [워커 접속 합의](WORKER_VERIFY_HANDOFF_20261018.md)를 따른다.
 
 ## 아직 실측 전인 것
 
 - 미니 중계(127.0.0.1:8781)와 NAS 워커 토큰 경로는 2026-10-17에 실측됨.
 - Muse 무료 연결, JEV 무료 자격·잔액·지원 여부 (키 없음 — 미호출).
-- MacBook LAYA 설치·MPS 추론·훈련 (터널·키 전달 전).
+- MacBook의 터널 200/401 및 LAYA 합성 3/7 스모크는 2026-10-18 사용자 보고로 전달받음.
+  이번 미니 작업에서 설치/추론을 직접 수행하거나 품질 통과로 확인한 것은 아님.
+- 변경 계약으로 맥북이 실제 verify를 완료하는 왕복 및 훈련은 미검증/미실행.
 - 실물 5건부터 20건 파일럿, 브라우저 검사, 봉인 audit.
