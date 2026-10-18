@@ -185,6 +185,12 @@ def shard_path(folder, name):
     return p
 
 
+def resource_retry_allowed(parent, progress, *, completed, retries):
+    return (parent.get('status') == 'interrupted' and parent.get('reason') == 'resource_or_pause_gate'
+            and isinstance(progress.get('optimizer_updates'), int) and 0 <= progress['optimizer_updates'] <= 1
+            and not completed and retries == 0)
+
+
 def bundle_rows():
     from workers.laya_local import policy as p
     folder = ROOT / 'incoming/moa-ko-synthetic-20261018-v1'
@@ -209,14 +215,29 @@ def bundle_rows():
 
 def train_child(folder):
     from workers.laya_local import ml
+    # Independent hard deadline also survives an unexpected parent SIGKILL.
+    signal.alarm(2700)
     rows, manifest, mhash = bundle_rows()
     request = json.loads((folder / 'reservation.json').read_bytes())
     if request['manifest_sha256'] != mhash: raise ValueError('training_manifest_changed')
+    # Clear only unused MPS allocations between variable-length examples, never
+    # lower the RAM/pressure gate or alter weights, dtype, labels or examples.
+    import torch
+    import laya.train as engine
+    original_load = engine.load_checkpoint
+    def low_cache_load(*args, **kwargs):
+        model, tok, cfg = original_load(*args, **kwargs)
+        def clear_unused(_model, _args):
+            torch.mps.synchronize(); torch.mps.empty_cache()
+        model.encoder.register_forward_pre_hook(clear_unused)
+        return model, tok, cfg
+    engine.load_checkpoint = low_cache_load
     result = ml.train(rows, manifest, ROOT / 'candidates' / folder.name)
     private_json(folder / 'training-result.json', result)
+    signal.alarm(0)
 
 
-def train_bundle():
+def train_bundle(*, retry_resource=False):
     """Explicit local training, not a fictitious model-upload API job.
 
     The parent owns the device lock and enforces resources and a45min wall
@@ -229,8 +250,37 @@ def train_bundle():
     if (folder / 'training-result.json').is_file():
         result = json.loads((folder / 'training-result.json').read_bytes())
         return {'run_id':folder.name, 'status':result['status'], 'duplicate':True}
-    if folder.exists(): raise ValueError('training_attempt_already_reserved')
-    runtime.run_limits(policy.digest(rows), rows)
+    retry_of = None
+    if folder.exists():
+        if not retry_resource: raise ValueError('training_attempt_already_reserved')
+        parent = json.loads((folder / 'PARENT_RESULT.json').read_bytes())
+        candidate = ROOT / 'candidates' / folder.name
+        progress = json.loads((candidate / 'progress.json').read_bytes())
+        retries = len(list((ROOT / 'runs').glob(folder.name+'-resource-retry*')))
+        if not resource_retry_allowed(parent, progress, completed=(candidate / 'TRAIN_RESULT.json').exists(), retries=retries):
+            raise ValueError('resource_retry_not_eligible')
+        # Preserve all prior reservations. The only duplicate exception is this
+        # one early resource abort, not a completed/tuned candidate. Weekly and
+        # historical split boundaries remain enforced across both attempts.
+        import datetime
+        week = datetime.datetime.now(datetime.timezone.utc).isocalendar()[:2]
+        reservations = list((ROOT / 'runs').glob('*/reservation.json'))
+        weekly = 0
+        for path in reservations:
+            prior = json.loads(path.read_bytes())
+            if datetime.datetime.fromisoformat(prior['reserved_at']).isocalendar()[:2] == week: weekly += 1
+            for row in rows:
+                for identity in (row['meta']['original_group_id'],row['meta']['family_group_id'],row['meta']['source_sha256']):
+                    old_split = prior.get('split_ledger', {}).get(identity)
+                    if old_split and old_split != row['meta']['split']: raise ValueError('historical_eval_group_leakage')
+            if path.parent != folder and (prior['dataset_sha256'] == policy.digest(rows) or
+                    set(prior.get('decision_signatures', [])) & set(runtime.decision_signatures(rows))):
+                raise ValueError('training_decisions_already_attempted')
+        if weekly >= 2: raise ValueError('weekly_run_limit')
+        retry_of = folder.name
+        folder = folder.with_name(folder.name+'-resource-retry1')
+    else:
+        runtime.run_limits(policy.digest(rows), rows)
     if training_stop_reason(runtime.resources(), 0): raise ValueError('training_resources_not_ready')
     with runtime.exclusive(ROOT / 'device.lock'):
         folder.mkdir(mode=0o700, parents=True)
@@ -240,17 +290,24 @@ def train_bundle():
         private_json(folder / 'reservation.json', {'manifest_sha256':mhash, 'dataset_sha256':policy.digest(rows),
                      'decision_signatures':runtime.decision_signatures(rows), 'split_ledger':ledger,
                      'reserved_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                     'max_wall_seconds':2700, 'max_epochs':1, 'max_updates':128, 'encoder_frozen':True})
+                     'max_wall_seconds':2700, 'max_epochs':1, 'max_updates':128, 'encoder_frozen':True,
+                     'retry_of':retry_of,'memory_policy':'empty_unused_mps_cache_before_encoder_v1'})
         started = time.monotonic(); reason = None
         logpath = folder / 'training.log'
         with logpath.open('ab') as log:
             logpath.chmod(0o600)
             child = subprocess.Popen([sys.executable, __file__, 'train-child', '--run-folder', str(folder)],
                                      stdout=log, stderr=log, cwd=ROOT / 'app')
-            reason = supervise_training(child, runtime.resources)
+            last_resources = {}
+            def check_resources():
+                nonlocal last_resources
+                last_resources = runtime.resources()
+                return last_resources
+            reason = supervise_training(child, check_resources)
         outcome = {'run_id':folder.name, 'status':'completed' if child.returncode == 0 else 'interrupted',
                    'reason':reason, 'exit_code':child.returncode, 'seconds':time.monotonic()-started,
                    'manifest_sha256':mhash, 'champion_changed':False}
+        if reason: outcome['stop_resources'] = last_resources
         private_json(folder / 'PARENT_RESULT.json', outcome)
         return outcome
 
@@ -341,6 +398,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['ready', 'run', 'receipt', 'daemon', 'train', 'train-child'])
     parser.add_argument('--run-folder', type=Path)
+    parser.add_argument('--retry-resource', action='store_true', help='at most one early resource-abort restart; no quality tuning')
     parser.add_argument('--max-jobs', type=int, default=100)
     parser.add_argument('--max-seconds', type=int, default=1800)
     args = parser.parse_args()
@@ -348,7 +406,7 @@ def main():
         raise ValueError('bounded_run_limits')
     os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1', WANDB_DISABLED='true')
     if args.action == 'daemon': standing_worker(); return
-    if args.action == 'train': print(json.dumps(train_bundle())); return
+    if args.action == 'train': print(json.dumps(train_bundle(retry_resource=args.retry_resource))); return
     if args.action == 'train-child':
         folder = args.run_folder.resolve()
         if folder.parent != (ROOT / 'runs').resolve() or not folder.name.startswith('train-pilot-'):

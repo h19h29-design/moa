@@ -39,6 +39,16 @@ def test_training_supervisor_reaps_only_its_child_on_resource_loss():
     assert child.poll() is not None
 
 
+def test_only_one_early_resource_retry_not_quality_tuning_is_allowed():
+    mod = adapter()
+    parent = {'status':'interrupted','reason':'resource_or_pause_gate'}
+    assert mod.resource_retry_allowed(parent, {'optimizer_updates':1}, completed=False, retries=0)
+    assert not mod.resource_retry_allowed(parent, {'optimizer_updates':2}, completed=False, retries=0)
+    assert not mod.resource_retry_allowed(parent, {'optimizer_updates':1}, completed=True, retries=0)
+    assert not mod.resource_retry_allowed(parent, {'optimizer_updates':1}, completed=False, retries=1)
+    assert not mod.resource_retry_allowed({'status':'interrupted','reason':'quality_failed'}, {'optimizer_updates':1}, completed=False, retries=0)
+
+
 def test_book_raw_labels_and_probabilities_are_not_replaced_by_rule_labels(monkeypatch):
     pkg = types.ModuleType('workers'); pkg.__path__ = []
     worker = types.ModuleType('workers.laya_local'); worker.__path__ = []
