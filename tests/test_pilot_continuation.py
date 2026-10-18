@@ -111,3 +111,30 @@ def test_missing_parent_coverage_cannot_count_completed_document(tmp_path):
         m['model_part_coverage'].pop()
         s.db.execute('UPDATE pilot_documents SET manifest=?', (json.dumps(m),))
         assert pilot.status(s)['end_to_end_documents'] == 0
+
+
+def test_completed_old_pilot_is_not_current_document_verification(tmp_path):
+    with Store(tmp_path) as s:
+        mid = document(s); pilot.prepare(s,[mid]); pilot.ingest_browser(s,browser_fixture(s,mid));ready(s)
+        for jid in pilot.publish(s)['job_ids']:
+            s.db.execute('UPDATE verification_evidence SET model_report=? WHERE job_id=?',('{"status":"completed"}',jid))
+        assert pilot.status(s)['end_to_end_documents'] == 1
+        mobile.generate(s,mid)
+        assert pilot.status(s)['end_to_end_documents'] == 0
+
+
+def test_refresh_reuses_only_automatic_new_parser_candidate_and_preserves_history(tmp_path):
+    with Store(tmp_path) as s:
+        mid = document(s);pilot.prepare(s,[mid]);old=mobile.revision(s,mid)
+        old_data=copy.deepcopy(old['data']);old_data['converter_version']='synthetic-old-version'
+        s.db.execute('UPDATE mobile_revisions SET payload=? WHERE id=?',(json.dumps(old_data),old['id']))
+        new=mobile.generate(s,mid)
+        pilot.prepare(s,[mid],refresh=True)
+        m=json.loads(s.db.execute('SELECT manifest FROM pilot_documents').fetchone()[0])
+        assert m['revision_id']==new['id']
+        assert s.db.execute('SELECT count(*) FROM pilot_history').fetchone()[0]==1
+        # Same-version arbitrary regeneration still cannot silently rebind.
+        mobile.generate(s,mid)
+        import pytest
+        with pytest.raises(ValueError,match='changed'):
+            pilot.prepare(s,[mid],refresh=True)

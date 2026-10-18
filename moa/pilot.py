@@ -135,8 +135,18 @@ def prepare(store, identifiers, *, refresh=False):
             if _evaluation(store, row['origin_notice_id']) or any(_file_evaluation(store, f['sha256']) for f in json.loads(row['files'])):
                 raise ValueError('evaluation original or derivative excluded')
         previous = store.db.execute('SELECT * FROM pilot_documents WHERE mobile_id=?', (ident,)).fetchone()
+        upgraded = None
         if previous and refresh:
-            if row['latest_revision'] != previous['revision_id'] or mobile.revision(store, ident)['data'].get('human_corrected'):
+            current = mobile.revision(store, ident)
+            if row['latest_revision'] != previous['revision_id']:
+                old = mobile.revision(store, ident, previous['revision_id'])['data']
+                data = current['data']
+                versions = lambda d: (d.get('parser_version'),d.get('converter_version'))
+                if (old.get('human_corrected') or versions(data) != (PARSER_VERSION,mobile.CONVERTER_VERSION) or versions(data) == versions(old)
+                        or data['files'] != old['files'] or data['title'] != old['title']):
+                    raise ValueError('cannot refresh changed pilot revision without an automatic parser upgrade')
+                upgraded = current  # reuse startup queue's fresh candidate; no extra revision
+            if row['state'] == 'processing' or current['data'].get('human_corrected'):
                 raise ValueError('cannot refresh changed or human-corrected pilot revision')
             store.db.execute('CREATE TABLE IF NOT EXISTS pilot_history('
                              'mobile_id TEXT,revision_id TEXT,manifest TEXT,archived_at REAL,'
@@ -150,7 +160,7 @@ def prepare(store, identifiers, *, refresh=False):
                 raise ValueError('pilot revision changed; explicit re-review required')
             manifest = json.loads(previous['manifest'])
         else:
-            revision = mobile.generate(store, ident)
+            revision = upgraded or mobile.generate(store, ident)
             inventory = source_inventory(store, revision['data'])
             manifest = {'mobile_id': ident, 'revision_id': revision['id'],
                         'html_sha256': revision['html_sha'], 'parser_version': PARSER_VERSION,
@@ -335,7 +345,9 @@ def status(store):
     for entry in store.db.execute('SELECT * FROM pilot_documents'):
         m = json.loads(entry['manifest']); ids = m.get('model_job_ids', [])
         evidence = [store.db.execute('SELECT model_report FROM verification_evidence WHERE job_id=?', (i,)).fetchone() for i in ids]
-        complete = bool(ids) and _coverage_complete(m) and m['parser_coverage_complete'] and \
+        current = mobile.notice_row(store,entry['mobile_id'])
+        current_revision = current['latest_revision'] == entry['revision_id'] and current['state'] != 'processing'
+        complete = current_revision and bool(ids) and _coverage_complete(m) and m['parser_coverage_complete'] and \
             m.get('rule_report', {}).get('status') == 'passed' and not m.get('model_context_exceptions') and all(e and e[0] and
             json.loads(e[0]).get('status') == 'completed' and not json.loads(e[0]).get('context_missing') and
             not json.loads(e[0]).get('truncated') for e in evidence)
@@ -344,6 +356,7 @@ def status(store):
         hard = sum(len(v['findings']) for v in m.get('rule_report', {}).get('viewports', []))
         result['hard_findings'] += hard
         result['items'].append({'mobile_id': entry['mobile_id'], 'revision_id': entry['revision_id'],
+                                'current_revision': current_revision,
                                 'rules': m.get('rule_report', {}).get('status', 'not_run'), 'hard_findings': hard,
                                 'model_jobs': len(ids), 'model_results': sum(bool(e and e[0]) for e in evidence),
                                 'end_to_end': complete, 'final_verdict': 'needs_review'})
