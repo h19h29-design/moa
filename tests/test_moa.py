@@ -554,13 +554,13 @@ def test_dext5_uploader_attachment_is_read_from_script():
 
 def test_status_reports_today_dedup_and_review_state(tmp_path,capsys):
     from moa.app import cli
-    from moa.core import Store
+    from moa.core import Store, kst_now
     from moa.learn import learn
     with Store(tmp_path) as store:
         asset=store.object(b'x','a.pdf')
         ident,_=store.save_notice(school(),'https://example.org/1','안내',
                                   '<table><tr><td>장소</td><td>운동장</td></tr></table>',[asset],
-                                  datetime.now().date().isoformat())
+                                  kst_now().date().isoformat())  # status counts Korean days, even on UTC runners
         learn(store,ident)
     assert cli(['--data',str(tmp_path),'status'])==0
     out=json.loads(capsys.readouterr().out)
