@@ -19,7 +19,7 @@ from .core import Store, digest, encode, kst_now, write_jsonl
 from .extract import LAYOUTS, PARSER_VERSION, detect_kind, html_document, table_pattern
 from .render import CSS, render_mobile, render_page
 
-CONVERTER_VERSION = 'moa-notice-v1'
+CONVERTER_VERSION = 'moa-notice-v2-shadow-dom'
 ROLES = ('convert', 'attachment')
 REASONS = {'unconfirmed': '아직 미확인', 'missing': '내용 누락',
            'table': '표 관계 오류', 'readability': '읽기 불편',
@@ -408,33 +408,44 @@ def render_notice(data: dict, file_url=None, candidate=True) -> str:
         parts.append('<p class="moa-warning">'+html.escape(w['message'])+'</p>')
     parts.append('<article class="moa-notice">')
     metadata = []
+    title_block = ''
+    def annotated(block, content):
+        return '<div class="moa-source-block" data-moa-block="%s" data-moa-type="%s">%s</div>' % (
+            html.escape(block['id'], quote=True), block['type'], content)
     for b in data.get('blocks',[]):
         if b['type'] == 'paragraph':
             text = b['text']
             if b.get('placement')=='source_info':
-                metadata.append(text)
+                metadata.append((b, text))
                 continue
-            if b.get('placement')=='title' and text==data['title']: continue
+            if b.get('placement')=='title' and text==data['title']:
+                title_block = b['id']
+                continue
             heading = text.startswith('[') and text.rstrip().endswith(']') or \
                 bool(re.fullmatch(r'[가-하][.．]\s*.{1,25}',text))
             tag = 'h2' if heading else 'p'
-            parts.append(f'<{tag} class="moa-paragraph">{html.escape(text)}</{tag}>')
+            parts.append(annotated(b, f'<{tag} class="moa-paragraph">{html.escape(text)}</{tag}>'))
         elif b['type'] == 'table':
+            fragment = ''
             if b['table'].get('caption'):
-                parts.append('<h2>'+html.escape(b['table']['caption'])+'</h2>')
-            parts.append(render_mobile(b['table'],b['layout']))
+                fragment += '<h2 class="moa-block-caption">'+html.escape(b['table']['caption'])+'</h2>'
+            fragment += render_mobile(b['table'],b['layout'])
             if b.get('note'):
-                parts.append('<p class="moa-paragraph">'+html.escape(b['note'])+'</p>')
+                fragment += '<p class="moa-paragraph moa-block-note">'+html.escape(b['note'])+'</p>'
+            parts.append(annotated(b, fragment))
     if metadata:
         parts.append('<section><h2>발신 정보·문의처 (원문 표기)</h2>'+''.join(
-            '<p class="moa-paragraph">'+html.escape(t)+'</p>' for t in metadata)+'</section>')
+            annotated(b, '<p class="moa-paragraph">'+html.escape(t)+'</p>') for b,t in metadata)+'</section>')
     parts.append('</article><section class="moa-attachments"><h2>원본 및 함께 첨부한 파일</h2><ul>')
     for file in data['files']:
         role = '원본 첨부 유지' if file['role'] == 'attachment' else '안내 원본 / 작성용 서식 포함 시 원본 사용'
         parts.append('<li><a href="%s">%s</a><span> · %s</span></li>' %
                      (html.escape(file_url(file),quote=True),html.escape(file['filename']),role))
     parts.append('</ul></section>')
-    return render_page(data['title'], ''.join(parts)).replace('</style>',
+    page = render_page(data['title'], ''.join(parts))
+    if title_block:
+        page = page.replace('<h3>', '<h3 data-moa-type="paragraph" data-moa-block="'+html.escape(title_block, quote=True)+'">', 1)
+    return page.replace('</style>',
         '.moa-notice,.moa-attachments{max-width:720px;margin:auto;background:white;padding:18px;border-radius:12px}'
         '.moa-paragraph{white-space:pre-wrap;line-height:1.8;overflow-wrap:anywhere}'
         'h2{font-size:18px;line-height:1.6}h3{max-width:720px;margin:16px auto;font-size:22px}'

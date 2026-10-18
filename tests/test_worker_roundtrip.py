@@ -278,6 +278,32 @@ def test_relay_does_not_forward_credentials_on_redirect(monkeypatch):
     assert visited == []
 
 
+def test_new_handoff_and_readiness_routes_remain_authenticated(store, monkeypatch):
+    from moa.worker_handoff import handoff
+    class API(WorkerMixin, BaseHTTPRequestHandler):
+        worker_token = 'synthetic-upstream-token'
+        def _security_headers(self): pass
+        def log_message(self, *args): pass
+        def do_GET(self): return self._worker_get(self.path, {})
+        def do_POST(self): return self._worker_post(self.path, self.rfile.read(int(self.headers.get('Content-Length', 0))))
+    API.store = store
+    relay = relay_module(); relay.Relay.relay_token = 'synthetic-relay-token'; relay.Relay.nas_token = API.worker_token
+    headers = {'Authorization': 'Bearer ' + relay.Relay.relay_token}
+    with serving(API) as upstream:
+        monkeypatch.setattr(relay, 'NAS_BASE', upstream)
+        with serving(relay.Relay) as base:
+            assert request(base, '/v1/worker/handoff')[0] == 401
+            assert request(base, '/v1/worker/ready', {})[0] == 401
+            assert request(base, '/v1/worker/training-receipt', {})[0] == 401
+            code, body = request(base, '/v1/worker/handoff', headers=headers)
+            assert code == 200 and json.loads(body)['questions'] == handoff()['questions']
+            ack = {**handoff(), 'worker_id': 'macbook-laya-01', 'worker_code_sha256': 'c' * 64, 'daemon_ready': True}
+            assert request(base, '/v1/worker/ready', ack, headers)[0] == 200
+            ack['canonical_vectors'][0]['sha256'] = '0' * 64
+            assert request(base, '/v1/worker/ready', ack, headers)[0] == 409
+            assert request(base, '/v1/worker/training-receipt', {}, headers)[0] == 400
+
+
 def test_concurrent_publication_creates_only_one_job_and_route(store):
     from concurrent.futures import ThreadPoolExecutor
     barrier = threading.Barrier(2)

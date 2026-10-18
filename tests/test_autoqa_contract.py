@@ -172,9 +172,10 @@ def test_claim_heartbeat_complete_records_machine_not_human():
     hb = worker_api.heartbeat(store, job["job_id"], job["lease_id"], fencing_token=job["fencing_token"], worker_id="macbook-laya-01")
     assert hb["ok"]
     res = worker_api.complete(store, _result_for(job), worker_api.validator_hash(), worker_id="macbook-laya-01")
-    assert res["ok"] and res["verdict"] == "machine_passed"
+    # Trial policy keeps real notice associations in shadow, even with calibration.
+    assert res["ok"] and res["verdict"] == "needs_review"
     machine = worker_api.machine_state(store, "notice-synth-1")
-    assert machine and machine["verdict"] == "machine_passed"
+    assert machine and machine["verdict"] == "needs_review"
     # Human approval surfaces untouched by worker completion.
     assert store.db.execute("SELECT count(*) FROM mobile_reviews").fetchone()[0] == 0
     assert store.db.execute(

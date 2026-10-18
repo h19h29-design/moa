@@ -23,11 +23,11 @@ from pathlib import Path
 
 BIND = "127.0.0.1"
 PORT = int(os.environ.get("MOA_RELAY_PORT", "8781"))
-RELAY_VERSION = "2026-10-18-v2"
+RELAY_VERSION = "2026-10-18-v3"
 NAS_BASE = os.environ.get("MOA_NAS_BASE", "http://192.168.1.111:8321").rstrip("/")
 CONF = Path.home() / ".config" / "moa"
 MAX_BODY = 1024 * 1024
-ALLOWED_POST = ("/v1/worker/claim",)
+ALLOWED_POST = ("/v1/worker/claim", "/v1/worker/ready", "/v1/worker/training-receipt")
 ARTIFACT_PATH = re.compile(r"/v1/worker/artifacts/[A-Za-z0-9][A-Za-z0-9_.-]{0,199}")
 JOB_PATH = re.compile(r"/v1/worker/jobs/[A-Za-z0-9][A-Za-z0-9_.-]{0,199}/(heartbeat|complete|fail)")
 LEASE_HEADERS = ("X-MOA-Worker-ID", "X-MOA-Job-ID", "X-MOA-Lease-ID", "X-MOA-Fencing-Token")
@@ -114,7 +114,7 @@ class Relay(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/healthz":
             return self._ok()
-        if path != "/v1/worker/capabilities" and not ARTIFACT_PATH.fullmatch(path):
+        if path not in ("/v1/worker/capabilities", "/v1/worker/handoff") and not ARTIFACT_PATH.fullmatch(path):
             return self._deny(404, "unknown path")
         if not self._authed():
             return self._deny(401, "relay unauthorized")

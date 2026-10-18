@@ -98,6 +98,19 @@ class MobileMixin:
             curation=get_record(self.store,row['origin_notice_id'])
             content+='<p class="card">자료 활용 분류: %s · <a href="/corpus/detail?id=%s">파일별 분류 확인·수정</a></p>' % (esc(USES[curation['use']] if curation else '미분류'),esc(row['origin_notice_id']))
         if old: content += '<p class="warning">과거 버전입니다. <a href="/notice?id=%s">최신 버전 열기</a></p>' % esc(ident)
+        if rev:
+            from .worker_api import evidence_state
+            checks = [e for e in evidence_state(self.store, ident) if e['render_revision'] == rev['id']]
+            if checks:
+                parent = next((e for e in checks if e['job_id'].startswith('parent-')), None)
+                content += '<section class="card"><h2>자동 검증 · 시험 운영</h2><p>자동 공개 꺼짐 · 최종 상태: 사람 검수 필요</p>'
+                if parent:
+                    report = parent['rule_report'] or {}
+                    count = sum(len(v.get('findings', [])) for v in report.get('viewports', []))
+                    content += '<p>원문/실제 HTML 규칙 검사: %s · 중요 확인 항목 %s개 (화면 크기별 합계)</p>' % (esc(report.get('status', '미실행')), count)
+                model = [e for e in checks if not e['job_id'].startswith('parent-')]
+                content += '<p>맥북 검증 결과 수신: %s / %s개 구역. 규칙과 모델 원판정은 별도로 저장합니다.</p>' % (sum(bool(e['model_report']) for e in model), len(model))
+                content += '<details><summary>모델 원판정·규칙·최종 판정 확인</summary><pre>'+esc(json.dumps(checks, ensure_ascii=False, indent=2))+'</pre></details></section>'
         if processing:
             content += '<p class="card" id="conversion-state" data-id="%s">모바일 HTML을 생성하고 있습니다. 완료되면 화면이 갱신됩니다.</p><script src="/static/mobile.js" defer></script>' % esc(ident)
         failed = self.store.db.execute("SELECT 1 FROM jobs WHERE kind='mobile' AND ref_id=? AND status='error'",(ident,)).fetchone()

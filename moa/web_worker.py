@@ -49,6 +49,12 @@ class WorkerMixin:
                                         worker_api.contract_hash(),
                                         worker_api.validator_hash(),
                                         worker_api.RUBRIC_REVISION)})
+        if path == '/v1/worker/handoff':
+            from .worker_handoff import handoff
+            from pathlib import Path
+            meta = Path(self.store.root) / 'coordination/HANDOFF_READY.json'
+            commit = json.loads(meta.read_text()).get('source_commit', 'unrecorded') if meta.is_file() else 'unrecorded'
+            return self._send_json(handoff(commit))
         if path.startswith("/v1/worker/artifacts/"):
             if query:
                 return self._send_json({"ok": False, "error": "query parameters forbidden"}, 400)
@@ -82,6 +88,25 @@ class WorkerMixin:
             return self._send_json({"ok": False, "errors": ["body must be UTF-8 JSON object"]}, 400)
         if not isinstance(body, dict):
             return self._send_json({"ok": False, "errors": ["body must be an object"]}, 400)
+        if path == '/v1/worker/ready':
+            result = worker_api.record_readiness(self.store, body)
+            return self._send_json(result, 200 if result['ok'] else 409)
+        if path == '/v1/worker/training-receipt':
+            if (not isinstance(body.get('worker_id'), str) or not wc.ASCII_ID.fullmatch(body['worker_id']) or
+                not isinstance(body.get('bundle_id'), str) or not wc.ASCII_ID.fullmatch(body['bundle_id']) or
+                not wc.HEX64.fullmatch(str(body.get('manifest_sha256', ''))) or
+                body.get('shards_verified') is not True):
+                return self._send_json({'ok': False, 'errors': ['verified bundle receipt required']}, 400)
+            from .training_bundle import receipt_errors
+            errors = receipt_errors(self.store.root, body)
+            if errors:
+                return self._send_json({'ok': False, 'errors': errors}, 409)
+            worker_api.ensure_worker_tables(self.store)
+            with self.store.db:
+                self.store.db.execute('INSERT INTO training_receipts VALUES(?,?,?,?)'
+                                      ' ON CONFLICT(worker_id,bundle_id) DO UPDATE SET receipt=excluded.receipt,recorded_at=excluded.recorded_at',
+                                      (body['worker_id'], body['bundle_id'], json.dumps(body, ensure_ascii=False), worker_api._now()))
+            return self._send_json({'ok': True, 'accepted': True, 'bundle_id': body['bundle_id']})
         if path == "/v1/worker/claim":
             kinds = body.get("kinds")
             worker_id = body.get("worker_id")
@@ -89,7 +114,7 @@ class WorkerMixin:
                     not isinstance(kinds, list) or not kinds or
                     any(not isinstance(k, str) or k not in wc.JOB_KINDS for k in kinds)):
                 return self._send_json({"ok": False, "error": "invalid worker_id or kinds"}, 400)
-            job = worker_api.claim(self.store, worker_id, kinds)
+            job = worker_api.claim(self.store, worker_id, kinds, worker_code_sha256=body.get('worker_code_sha256'))
             if job is None:
                 return self._send_json({"ok": True, "job": None}, 204)
             return self._send_json({"ok": True, "job": job})

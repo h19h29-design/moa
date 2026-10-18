@@ -23,11 +23,11 @@ import secrets
 import time
 import uuid
 from . import worker_contract as wc
+from .worker_handoff import RUBRIC_REVISION
 
 VERIFY_LEASE_SECONDS = 600
 TRAIN_LEASE_SECONDS = 3600
 HEARTBEAT_SECONDS = 30
-RUBRIC_REVISION = "moa.rubric.v1"
 MAX_ARTIFACT_BYTES = 1024 * 1024
 
 WORKER_DDL = """
@@ -71,6 +71,22 @@ CREATE TABLE IF NOT EXISTS worker_result_attempts(
 CREATE TABLE IF NOT EXISTS worker_job_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
   event TEXT NOT NULL, worker_id TEXT NOT NULL, recorded_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS worker_readiness(
+  worker_id TEXT PRIMARY KEY, validator_hash TEXT NOT NULL,
+  ack TEXT NOT NULL, recorded_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS verification_evidence(
+  job_id TEXT PRIMARY KEY, notice_id TEXT NOT NULL,
+  source_revision TEXT NOT NULL, render_revision TEXT NOT NULL,
+  html_sha256 TEXT NOT NULL, rule_report TEXT NOT NULL,
+  browser_report TEXT NOT NULL, model_report TEXT,
+  final_verdict TEXT NOT NULL DEFAULT 'needs_review', updated_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS pilot_documents(
+  mobile_id TEXT PRIMARY KEY, revision_id TEXT NOT NULL,
+  manifest TEXT NOT NULL, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS training_receipts(
+  worker_id TEXT NOT NULL, bundle_id TEXT NOT NULL,
+  receipt TEXT NOT NULL, recorded_at REAL NOT NULL,
+  PRIMARY KEY(worker_id,bundle_id));
 """
 
 
@@ -100,6 +116,9 @@ def validator_hash() -> str:
     h.update(Path(__file__).read_bytes())
     h.update(WORKER_DDL.encode())
     h.update(RUBRIC_REVISION.encode())
+    # The question semantics and hard content gate are part of this validator.
+    for name in ('worker_handoff.py', 'verification.py'):
+        h.update(Path(__file__).with_name(name).read_bytes())
     return h.hexdigest()
 
 
@@ -120,12 +139,19 @@ def check_worker_token(provided: str, expected: str) -> bool:
 
 
 def capabilities(contract_hash: str, validator_hash: str, rubric_revision: str) -> dict:
+    from .worker_handoff import rubric_sha256, QUESTIONS_REVISION
     return {
         "contract_version": wc.CONTRACT_VERSION,
         "contract_hash": contract_hash,
         "job_kinds": list(wc.JOB_KINDS),
         "validator_hash": validator_hash,
         "rubric_revision": rubric_revision,
+        "rubric_sha256": rubric_sha256(),
+        "questions_revision": QUESTIONS_REVISION,
+        "handoff_path": "/v1/worker/handoff",
+        "readiness_path": "/v1/worker/ready",
+        "auto_pass_enabled": False,
+        "auto_publish_enabled": False,
         "verify_lease_seconds": VERIFY_LEASE_SECONDS,
         "heartbeat_seconds": HEARTBEAT_SECONDS,
         "canonicalization": wc.CANONICALIZATION,
@@ -137,6 +163,37 @@ def capabilities(contract_hash: str, validator_hash: str, rubric_revision: str) 
         "max_artifact_bytes": MAX_ARTIFACT_BYTES,
         "artifact_lease_headers": ["X-MOA-Worker-ID", "X-MOA-Job-ID", "X-MOA-Lease-ID", "X-MOA-Fencing-Token"],
     }
+
+
+def record_readiness(store, ack: dict) -> dict:
+    from .worker_handoff import readiness_errors
+    errors = readiness_errors(ack)
+    if errors:
+        return {'ok': False, 'errors': errors}
+    ensure_worker_tables(store)
+    with store.db:
+        store.db.execute('INSERT INTO worker_readiness VALUES(?,?,?,?)'
+                         ' ON CONFLICT(worker_id) DO UPDATE SET validator_hash=excluded.validator_hash,'
+                         ' ack=excluded.ack,recorded_at=excluded.recorded_at',
+                         (ack['worker_id'], validator_hash(), json.dumps(ack, ensure_ascii=False), _now()))
+    return {'ok': True, 'accepted': True, 'worker_id': ack['worker_id'],
+            'validator_hash': validator_hash()}
+
+
+def ready(store, worker_id: str) -> bool:
+    ensure_worker_tables(store)
+    row = store.db.execute('SELECT validator_hash FROM worker_readiness WHERE worker_id=?',
+                           (worker_id,)).fetchone()
+    return bool(row and row['validator_hash'] == validator_hash())
+
+
+def evidence_state(store, notice_id: str) -> list:
+    ensure_worker_tables(store)
+    rows = store.db.execute('SELECT job_id,source_revision,render_revision,html_sha256,'
+                            'rule_report,browser_report,model_report,final_verdict FROM verification_evidence'
+                            ' WHERE notice_id=? ORDER BY updated_at DESC', (notice_id,))
+    return [{**dict(r), **{key: json.loads(r[key]) if r[key] else None
+             for key in ('rule_report', 'browser_report', 'model_report')}} for r in rows]
 
 
 def put_artifact(store, content: bytes) -> dict:
@@ -191,6 +248,8 @@ def enqueue_job(store, envelope: dict, *, target_worker_id: str | None = None) -
         return {"ok": False, "errors": errors}
     if envelope["job_kind"] == "verify":
         errors = wc.validate_verify_payload(envelope["payload"])
+        if envelope['payload'].get('require_rubric_hash') and envelope['rubric_revision'] != RUBRIC_REVISION:
+            errors.append('current shared rubric required')
     elif envelope["job_kind"] in ("train", "validate_candidate"):
         errors = wc.validate_train_payload(envelope["payload"])
     if errors:
@@ -237,7 +296,7 @@ def enqueue_job(store, envelope: dict, *, target_worker_id: str | None = None) -
     return {"ok": True, "job_id": envelope["job_id"]}
 
 
-def claim(store, worker_id: str, kinds: list[str]) -> dict | None:
+def claim(store, worker_id: str, kinds: list[str], *, worker_code_sha256=None) -> dict | None:
     """Hand out the oldest pending job matching worker capabilities."""
     ensure_worker_tables(store)
     if (not isinstance(worker_id, str) or not wc.ASCII_ID.fullmatch(worker_id) or
@@ -259,6 +318,12 @@ def claim(store, worker_id: str, kinds: list[str]) -> dict | None:
     for cand in row:
         if cand["job_kind"] not in kinds:
             continue
+        if json.loads(cand['envelope'])['payload'].get('requires_readiness') and not ready(store, worker_id):
+            continue
+        if json.loads(cand['envelope'])['payload'].get('requires_readiness'):
+            ack = store.db.execute('SELECT ack FROM worker_readiness WHERE worker_id=?', (worker_id,)).fetchone()
+            if not ack or json.loads(ack[0]).get('worker_code_sha256') != worker_code_sha256:
+                continue
         lease_seconds = (TRAIN_LEASE_SECONDS if cand["job_kind"] in
                          ("train", "validate_candidate")
                          else VERIFY_LEASE_SECONDS)
@@ -390,6 +455,11 @@ def complete(store, result_env: dict, validator_hash: str, *, worker_id=None) ->
             return _ack(result_env, prior["verdict"], duplicate=True)
         return {"ok": False, "stale": True, "reasons": ["conflicting result already recorded"]}
     stale_reasons = _lease_errors(job, result_env["lease_id"], result_env["fencing_token"], worker_id, now)
+    if original['payload'].get('requires_readiness') and original['payload'].get('notice_id'):
+        current = store.db.execute('SELECT latest_revision FROM mobile_notices WHERE id=?',
+                                  (original['payload']['notice_id'],)).fetchone()
+        if not current or current[0] != result_env['render_revision']:
+            stale_reasons.append('notice revision changed under result')
     payload = result_env["payload"]
     if not isinstance(payload, dict):
         return {"ok": False, "errors": ["result payload must be an object"]}
@@ -410,11 +480,17 @@ def complete(store, result_env: dict, validator_hash: str, *, worker_id=None) ->
         errors = _source_manifest_errors(store, original) + wc.validate_verify_result(payload, original["payload"])
         if errors:
             return {"ok": False, "errors": errors}
+        if original['payload'].get('require_rubric_hash'):
+            from .worker_handoff import rubric_sha256
+            if payload.get('rubric_sha256') != rubric_sha256():
+                return {'ok': False, 'errors': ['actual model question definitions mismatch']}
         if payload["status"] == "completed":
             verdict = "machine_passed" if all(a["label"] == "preserved" and a["calibrated"] for a in payload["answers"].values()) else "needs_review"
         # The input job, never worker output, owns the notice association.
         notice_id = str(original["payload"].get("notice_id", ""))
         if notice_id:
+            # Trial policy: no real document auto-passes, including calibrated outputs.
+            verdict = 'needs_review'
             store.db.execute(
                 "INSERT OR IGNORE INTO machine_checks(notice_id, source_revision,"
                 " render_revision, rubric_revision, verdict, job_id, checked_at)"
@@ -422,6 +498,11 @@ def complete(store, result_env: dict, validator_hash: str, *, worker_id=None) ->
                 (notice_id, result_env["source_revision"],
                  result_env["render_revision"], result_env["rubric_revision"],
                  verdict, result_env["job_id"], now))
+        with store.db:
+            store.db.execute('UPDATE verification_evidence SET model_report=?,final_verdict=?,updated_at=?'
+                             ' WHERE job_id=? AND source_revision=? AND render_revision=?',
+                             (json.dumps(payload, ensure_ascii=False), 'needs_review', now,
+                              result_env['job_id'], result_env['source_revision'], result_env['render_revision']))
     store.db.execute("UPDATE worker_jobs SET status='done', updated_at=?"
                      " WHERE job_id=?", (now, result_env["job_id"]))
     store.db.execute("INSERT INTO worker_job_events(job_id,event,worker_id,recorded_at) VALUES(?,?,?,?)",
