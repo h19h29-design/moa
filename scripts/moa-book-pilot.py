@@ -78,6 +78,14 @@ def quality_metrics(records, *, breakdown=True):
            'changed_missed_as_preserved': cm['changed']['preserved'],
            'unsafe_false_preserved': cm['changed']['preserved'] + cm['insufficient']['preserved'],
            'auto_promotion_allowed': False}
+    for name, actual, predicted in (
+            ('changed_to_preserved_rate','changed','preserved'),
+            ('changed_to_insufficient_rate','changed','insufficient'),
+            ('insufficient_to_preserved_rate','insufficient','preserved'),
+            ('preserved_to_changed_rate','preserved','changed')):
+        out[name] = cm[actual][predicted]/gold[actual] if gold[actual] else None
+    predicted_preserved = sum(cm[a]['preserved'] for a in labels)
+    out['predicted_preserved_error_rate'] = out['unsafe_false_preserved']/predicted_preserved if predicted_preserved else None
     if breakdown:
         for field in ('criterion', 'mutation'):
             out['by_'+field] = {key: quality_metrics([r for r in records if r.get(field)==key], breakdown=False)

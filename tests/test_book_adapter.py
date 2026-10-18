@@ -63,6 +63,11 @@ def test_quality_metrics_expose_majority_baseline_and_unsafe_false_preserved():
     assert out['changed_missed_as_preserved'] == 1
     assert out['by_criterion']['conditions']['accuracy'] == pytest.approx(1/3)
     assert out['confusion']['changed']['preserved'] == 1
+    assert out['changed_to_preserved_rate'] == .5
+    assert out['changed_to_insufficient_rate'] == .5
+    assert out['insufficient_to_preserved_rate'] == 1
+    assert out['preserved_to_changed_rate'] == 0
+    assert out['predicted_preserved_error_rate'] == pytest.approx(2/3)
     assert out['balanced_accuracy'] == pytest.approx(1/3)
     assert out['auto_promotion_allowed'] is False
     with pytest.raises(ValueError, match='quality_label'):
