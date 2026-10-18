@@ -27,8 +27,9 @@ Canonicalization은 `python-json-sort-keys-utf8-v1`:
   서버 값을 그대로 복사한 별칭 치환만으로 정식 지원이라고 주장하지 않는다.
 - 새 pilot job은 준비 확인된 **동일 executor 코드 해시를 claim body로 제시**해야 한다.
   옛 상시 데몬이 같은 worker_id로 새 pilot job을 가져가지 못한다.
-- `scripts/moa-book-pilot.py`는 기존 Book LAYA policy/ml/runtime을 사용하는 별도 bounded pull client다.
-  기존 상시 데몬을 덮어쓰거나 재설치하지 않는다. `daemon_ready=false`를 명시한다.
+- `scripts/moa-book-pilot.py`는 기존 Book LAYA policy/ml/runtime을 사용하는 별도 실행기다.
+  `run` 소량 실행과 `daemon` 상시 실행을 구분한다. 기존 Book Python source 9개를 보존하고
+  기존 LaunchAgent의 진입점만 버전 고정 실행기로 연결했다. 상시 실행은 `daemon_ready=true`다.
 - 아티팩트는 1MiB 이하, live lease의 worker/job/lease/fencing 헤더 네 개를 모두 검사한다.
 - result_ack는 complete 응답 내 inline ACK. 별도 ACK API 없음. 모델 업로드는 지원하지 않는다.
 - 토큰은 기존 보호 파일에서 읽어 Authorization 헤더에만 넣는다. 기존 LAN SSH 터널을 재사용한다.
@@ -65,19 +66,26 @@ DB 온라인 백업 quick_check와 앱/환경설정 보호 백업 후 review만 
 기존 승인 기록·원본 파일·수집 실적을 초기화하지 않는다. 전체 자료 일괄 변환도 하지 않는다.
 Muse/JEV의 실제 무료 자격·전송 조건은 확인되지 않아 호출하지 않는다. 유료 대체/충전 없음.
 
-## Book 후속 작업과 현재 미완료 경계
+## 후속 실행 결과와 남은 경계 (16:14 KST)
 
-실행 기준 코드는 `a57edf282c69a80da910919111fbb61514715197`다. 문서 전용 후속 커밋은 실행 모듈 지문을 바꾸지 않는다.
-별도 bounded client로 새 pilot 작업45개가 NAS에 수락됐다(실추론44, 토큰 초과 사전 보류1).
-이 결과는 기존 상시 데몬의 통합 완료가 아니다. 새 묶음 `moa-ko-synthetic-20261018-v1`은 Book 실제 파일/해시/loader 확인과 NAS receipt까지 완료했지만 아직 훈련하지 않았다.
+현재 기능 코드는 `5a5b5f6bc2071d15f76dc9f21eccbb5a785e9440`이다.
+이전 소량 45개 작업 결과는 역사 기록이며 현재 문서 실적과 합산하지 않는다.
+두 문서의 문맥·경계 문제와 외곽 표를 고친 후 **현재 리비전 20건/구역 388개**를 끝까지 처리했다.
+자세한 증거와 한계는 [후속 보고서](MOA_CONTINUATION_STATUS_2026-10-18.md)에 있다.
 
-Book 담당자는 `incoming/MOA_PILOT_STATUS_2026-10-18.md`, `incoming/HANDOFF_READY.json`,
-`incoming/moa-ko-synthetic-20261018-v1/TRAINING_BUNDLE_READY.json`을 함께 읽는다.
-기존 worker와 로컬 변경을 보존한 별도 patch/커밋으로 계약 어댑터와 학습 소비를 통합한다. 같은 원격 브랜치 동시 push 금지.
+- `pilot_incomplete_context` 해소: 헤더·병합 문맥·각주를 유지한 행 분할과 명확한 빈 신청서 경계 증거.
+  현재 리비전의 실제 브라우저 60개 폭과 모든 구역 검사 완료. 평가·사람 승인·수정 자료는 보호한다.
+- `book_daemon_adapter_pending` 해소: 기존 source는 보존하고 `incoming/moa-book-worker-8b301ad.py`를
+  기존 MOA LaunchAgent에 연결했다. 실제 상시 claim/heartbeat/complete, 중복 ACK, 빈 claim 204,
+  idle 워커 SIGTERM 후 KeepAlive 새 PID 복귀를 확인했다. 실제 절전·재부팅은 미시험이다.
+- `book_trainer_budget_alignment` 해소: parent/child 45분 상한, 자원/기기 lock/주간 제한 유지.
+  자원 중단 1회와 동일 자료의 자원 전용 재시도 1회를 보존했다.
+- 새 묶음 학습600쌍/38회 update, encoder 동결, candidate 저장·재로딩·재추론과 분리 평가200쌍 완료.
+  보정200쌍은 따로 보관했으나 보정 모델을 맞추지는 않았다. 평가 정확도37.5%로 개선을 확인하지 못했다.
+  후보는 private Book에, 결과 증거는 Mini/NAS에 보관했다. champion은 기존 모델 그대로다.
 
-- `blocked_by=book_daemon_adapter_pending`: 실제 스키마 바이트·질문·canonical 벡터·4개 lease 헤더·inline ACK를 검증한다. 서버 해시 복사로 우회하지 않는다.
-- `blocked_by=book_trainer_budget_alignment`: 현재 trainer의 내부90분 상한을 이 시험의45분 상한에 맞춘다. 최대1epoch/200updates/45분, encoder freeze/micro batch1을 지키며 AC·유휴15분·메모리·디스크·기기 lock을 우회하지 않는다.
-- 새 묶음 실제 학습 → candidate 재로딩 → 분리된 calibration/held-out 평가 증거를 남기고 Mini에 patch와 결과를 돌려준다. JEV/자기 판정/미확인 보류를 정답으로 쓰지 않는다. 운영 champion 승격 없음.
-- `blocked_by=pilot_incomplete_context`: Mini가 긴 표/본문의 문맥 보존 분할과 혼합 문서 경계를 해결하기 전 누계20건으로 확대하지 않는다.
-
-훈련 실행이나 데몬 재시작을 했다고 주장하지 않는다. 기존 완료 합성 job을 재발행하지 않는다.
+Book 담당자는 `incoming/MOA_CONTINUATION_STATUS_2026-10-18.md`, `incoming/HANDOFF_READY.json`,
+`incoming/PILOT_20_FINAL_20261018.json`을 함께 읽는다. 연결 재설치·토큰 재입력은 필요 없다.
+남은 경계는 모델 품질·독립 human gold·확률 보정·장시간/절전 운용 검증이다.
+공통 계약 해시는 유지했으며 JEV/자기 판정/미확인 보류를 정답으로 쓰지 않는다.
+실자료 자동 품질 통과·공개·사람 승인 대행·champion 승격은 켜지 않는다. 동일 원격 브랜치 동시 push도 금지한다.
