@@ -64,3 +64,20 @@ core schema version5와 기존 collector 테이블/컬럼은 변경하지 않는
 DB 온라인 백업 quick_check와 앱/환경설정 보호 백업 후 review만 교체한다. collector는 재시작하지 않는다.
 기존 승인 기록·원본 파일·수집 실적을 초기화하지 않는다. 전체 자료 일괄 변환도 하지 않는다.
 Muse/JEV의 실제 무료 자격·전송 조건은 확인되지 않아 호출하지 않는다. 유료 대체/충전 없음.
+
+## Book 후속 작업과 현재 미완료 경계
+
+실행 기준 코드는 `a57edf282c69a80da910919111fbb61514715197`다. 문서 전용 후속 커밋은 실행 모듈 지문을 바꾸지 않는다.
+별도 bounded client로 새 pilot 작업45개가 NAS에 수락됐다(실추론44, 토큰 초과 사전 보류1).
+이 결과는 기존 상시 데몬의 통합 완료가 아니다. 새 묶음 `moa-ko-synthetic-20261018-v1`은 Book 실제 파일/해시/loader 확인과 NAS receipt까지 완료했지만 아직 훈련하지 않았다.
+
+Book 담당자는 `incoming/MOA_PILOT_STATUS_2026-10-18.md`, `incoming/HANDOFF_READY.json`,
+`incoming/moa-ko-synthetic-20261018-v1/TRAINING_BUNDLE_READY.json`을 함께 읽는다.
+기존 worker와 로컬 변경을 보존한 별도 patch/커밋으로 계약 어댑터와 학습 소비를 통합한다. 같은 원격 브랜치 동시 push 금지.
+
+- `blocked_by=book_daemon_adapter_pending`: 실제 스키마 바이트·질문·canonical 벡터·4개 lease 헤더·inline ACK를 검증한다. 서버 해시 복사로 우회하지 않는다.
+- `blocked_by=book_trainer_budget_alignment`: 현재 trainer의 내부90분 상한을 이 시험의45분 상한에 맞춘다. 최대1epoch/200updates/45분, encoder freeze/micro batch1을 지키며 AC·유휴15분·메모리·디스크·기기 lock을 우회하지 않는다.
+- 새 묶음 실제 학습 → candidate 재로딩 → 분리된 calibration/held-out 평가 증거를 남기고 Mini에 patch와 결과를 돌려준다. JEV/자기 판정/미확인 보류를 정답으로 쓰지 않는다. 운영 champion 승격 없음.
+- `blocked_by=pilot_incomplete_context`: Mini가 긴 표/본문의 문맥 보존 분할과 혼합 문서 경계를 해결하기 전 누계20건으로 확대하지 않는다.
+
+훈련 실행이나 데몬 재시작을 했다고 주장하지 않는다. 기존 완료 합성 job을 재발행하지 않는다.
