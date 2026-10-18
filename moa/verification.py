@@ -6,29 +6,105 @@ An extracted source is not a proof that the original parser covered the whole fi
 from __future__ import annotations
 
 import re
+from collections import Counter
 
-GATE_VERSION = 'moa-content-gate-v1'
+GATE_VERSION = 'moa-content-gate-v2-structural'
 
 
-def normalise(text: str, year: str = '') -> str:
+def normalise(text: str, year: str = '', *, compact=True) -> str:
     text = str(text).replace('\u00a0', ' ')
     # A missing year can inherit only the explicit source block's year.
     def date(m):
         return '%s-%02d-%02d' % (m.group(1) or year, int(m.group(2)), int(m.group(3)))
     text = re.sub(r'(?:(\d{4})\s*(?:년|[./-])\s*)?(\d{1,2})\s*월\s*(\d{1,2})\s*일', date, text)
     text = re.sub(r'(\d{4})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{1,2})\.?', date, text)
+    def short_date(m):
+        month, day = int(m.group(1)), int(m.group(2))
+        return '%s-%02d-%02d' % (year,month,day) if 1 <= month <= 12 and 1 <= day <= 31 else m.group(0)
+    text = re.sub(r'(?<![\d./-])(\d{1,2})\s*[./]\s*(\d{1,2})(?:\.(?!\d)|(?=\s|$|\(|~|-|까지|부터))',
+                  short_date, text)
     def clock(m):
         hour = int(m.group(2))
         if m.group(1):
             hour = hour % 12 + (12 if m.group(1) == '오후' else 0)
         return '%02d:%02d' % (hour, int(m.group(3) or 0))
     text = re.sub(r'(오전|오후)?\s*(\d{1,2})\s*시\s*(?:(\d{1,2})\s*분)?', clock, text)
+    text = re.sub(r'(?<!\d)(\d{1,2}):(\d{2})(?!\d)',
+                  lambda m: '%02d:%s' % (int(m.group(1)),m.group(2)),text)
     text = re.sub(r'(?<=\d),(?=\d{3}(?:\D|$))', '', text)
-    return re.sub(r'\s+', '', text)
+    return re.sub(r'\s+', '' if compact else ' ', text)
+
+
+def critical_facts(text, year=''):
+    """Keep order/multiplicity within the source block, not a document number bag."""
+    # Keep whitespace here: compacting "2026-10-30 17:00" joins two
+    # independent facts into an invalid day and hides both regex matches.
+    value = normalise(text, year, compact=False)
+    return {name: [re.sub(r'\s+','',v) for v in re.findall(expression, value)] for name, expression in (
+        ('date', r'(?<!\d)(?:20\d{2})?-\d{2}-\d{2}(?!\d)'),
+        ('time', r'(?<!\d)\d{1,2}:\d{2}(?!\d)'),
+        ('amount', r'(?<![\d.])\d+(?:\.\d+)?\s*(?:만|천)?\s*원'),
+        ('selection', r'(?<!\d)\d+\s*(?:개|과목)'))}
+
+
+def department_links(rows):
+    """Read semantic source headers directly, independently of mobile.repeated_columns.
+
+    Two repeated triples and one flat triple share the same (ordinal, department,
+    room) relations. Unknown layouts are NOT inferred from column counts.
+    """
+    rows = [[re.sub(r'\s+', '', str(c)) for c in row] for row in rows]
+    departments, rooms, numbers = {'학과', '학과명'}, {'교실', '수업교실', '장소'}, {'연번', '번호'}
+    for index, row in enumerate(rows):
+        if len(row) == 2 and row[0] in departments and row[1] in rooms:
+            width, numbered = 2, False
+        elif len(row) in (3, 6) and all(row[o] in numbers and row[o+1] in departments and row[o+2] in rooms
+                                             for o in range(0, len(row), 3)):
+            width, numbered = 3, True
+        else:
+            continue
+        pairs, valid = [], True
+        for data in rows[index+1:]:
+            if not any(data):
+                continue
+            if len(data) != len(row):
+                valid = False
+                continue
+            for offset in range(0, len(row), width):
+                group = data[offset:offset+width]
+                if not any(group):
+                    continue
+                if not all(group) or numbered and not group[0].isdigit():
+                    valid = False
+                    continue
+                pairs.append((str(int(group[0])) if numbered else '', group[-2], group[-1]))
+        keys = [p[0] if numbered else p[1] for p in pairs]
+        valid &= bool(pairs) and len(keys) == len(set(keys))
+        return {'recognized': True, 'valid': bool(valid), 'pairs': pairs,
+                'preamble': ''.join(''.join(r) for r in rows[:index])}
+    return {'recognized': False, 'valid': False, 'pairs': [], 'preamble': ''}
+
+
+def combine_verdict(rule_report, model_reports, *, browser_ok):
+    """Trial quality verdict, never an approval or promotion of an R1 checkpoint."""
+    labels, completed = [], bool(model_reports)
+    for report in model_reports:
+        answers = report.get('criteria', report.get('answers', {}))
+        completed &= report.get('status') == 'completed' and bool(answers) and not report.get('truncation')
+        completed &= not report.get('context_missing') and not report.get('truncated')
+        for answer in answers.values():
+            raw = answer.get('model_label', answer.get('label'))
+            labels.append(raw)
+            completed &= raw == 'preserved' and answer.get('label') == 'preserved'
+    passed = (rule_report.get('status') == 'passed' and not rule_report.get('findings') and
+              browser_ok and completed and bool(labels))
+    return {'status': 'passed' if passed else 'needs_review', 'rule_status': rule_report.get('status'),
+            'model_labels': labels, 'browser_ok': bool(browser_ok), 'mode': 'shadow_only',
+            'human_approved': False, 'auto_pass_enabled': False, 'auto_publish_enabled': False}
 
 
 def compare(sources: list, rendered: list, *, source_complete=True, attachments=()) -> dict:
-    findings = []
+    findings, direct = [], []
     def fail(code, source_id='', detail=''):
         findings.append({'code': code, 'source_id': source_id, 'severity': 'critical', 'detail': detail})
     if not source_complete:
@@ -66,10 +142,34 @@ def compare(sources: list, rendered: list, *, source_complete=True, attachments=
         years = re.findall(r'\b(20\d{2})\s*(?:년|[./-])', source.get('text', ''))
         year = years[0] if len(set(years)) == 1 else ''
         norm = lambda text: normalise(text, year)
+        left_text = source.get('text', '')
+        right_text = block.get('visible_text', '')
+        if 'table_rows' in source:
+            left_text = '\n'.join([source.get('caption',''), *(' / '.join(row) for row in source['table_rows']), source.get('note','')])
+            right_text = '\n'.join([block.get('caption',''), *(' / '.join(row) for row in block.get('table_rows', [])), block.get('note','')])
+        expected_facts, actual_facts = critical_facts(left_text, year), critical_facts(right_text, year)
+        evidence = {'source_id': sid, 'expected_facts': expected_facts, 'actual_facts': actual_facts}
+        direct.append(evidence)
+        for name in expected_facts:
+            if expected_facts[name] != actual_facts[name]:
+                fail(name + '_mismatch', sid)
         if 'table_rows' in source:
             expected = [[norm(c) for c in row] for row in source['table_rows']]
             actual = [[norm(c) for c in row] for row in block.get('table_rows', [])]
-            if expected != actual:
+            original = source.get('original_table_rows', source['table_rows'])
+            src_links, dom_links = department_links(original), department_links(block.get('table_rows', []))
+            link_match = (src_links['recognized'] and src_links['valid'] and dom_links['valid'] and
+                          Counter(src_links['pairs']) == Counter(dom_links['pairs']))
+            evidence['department_links'] = {'recognized': src_links['recognized'],
+                'expected_count': len(src_links['pairs']), 'observed_count': len(dom_links['pairs']),
+                'one_to_one_preserved': bool(link_match)}
+            if src_links['recognized'] and not link_match:
+                fail('department_classroom_mismatch', sid)
+            # Only explicit repeated semantic triples may change shape. Keep the
+            # generic row/merge/context gates for all other tables.
+            preamble_kept = not src_links['preamble'] or norm(src_links['preamble']) == norm(source.get('caption',''))
+            reflow = len(original) > 0 and any(len(row) == 6 for row in original) and link_match and preamble_kept
+            if expected != actual and not reflow:
                 fail('table_relation_mismatch', sid)
             if source.get('table_geometry') != block.get('table_geometry') and source.get('table_geometry'):
                 fail('table_merge_mismatch', sid)
@@ -79,15 +179,8 @@ def compare(sources: list, rendered: list, *, source_complete=True, attachments=
             continue
         left, right = norm(source.get('text', '')), norm(block.get('visible_text', ''))
         if left != right:
-            code = 'content_or_condition_mismatch'
-            for name, expression in (('date_mismatch', r'(?:20\d{2})?-\d{2}-\d{2}'),
-                                     ('time_mismatch', r'\d{2}:\d{2}'),
-                                     ('amount_mismatch', r'\d+(?:원|만원)'),
-                                     ('selection_mismatch', r'\d+개')):
-                if re.findall(expression, left) != re.findall(expression, right):
-                    code = name
-                    break
-            fail(code, sid)
+            fail('content_or_condition_mismatch', sid)
     return {'gate_version': GATE_VERSION, 'status': 'needs_review' if findings else 'passed',
             'findings': findings, 'expected_blocks': len(sources),
-            'observed_blocks': len(rendered), 'source_complete': bool(source_complete)}
+            'observed_blocks': len(rendered), 'source_complete': bool(source_complete),
+            'direct_comparison': direct}

@@ -79,3 +79,82 @@ def test_readiness_requires_actual_question_mapping_and_vectors():
     wrong = copy.deepcopy(ack)
     wrong['canonical_vectors'][0]['sha256'] = '0' * 64
     assert readiness_errors(wrong)
+
+
+def test_each_critical_fact_is_reported_even_inside_a_table():
+    src = [{'id': 's1', 'text': '', 'table_rows': [
+        ['일정', '비용 및 선택'], ['2026.10.30 17:00', '12,000원 / 2개 선택']]}]
+    got = rendered('', table_rows=[
+        ['일정', '비용 및 선택'], ['2026.10.31 18:00', '13,000원 / 1개 선택']])
+    codes = {f['code'] for f in compare(src, got)['findings']}
+    assert {'date_mismatch', 'time_mismatch', 'amount_mismatch', 'selection_mismatch'} <= codes
+
+
+def test_repeated_source_columns_can_be_reflowed_without_changing_links():
+    raw = [['연번', '학과', '수업교실', '연번', '학과', '수업교실'],
+           ['1', '역사교육과', '2-1', '3', '행정학과', '2-3'],
+           ['2', '신소재공학과', '2-2', '', '', '']]
+    flat = [['연번', '학과', '수업교실'], ['1', '역사교육과', '2-1'],
+            ['2', '신소재공학과', '2-2'], ['3', '행정학과', '2-3']]
+    source = [{'id': 's1', 'text': '', 'table_rows': raw}]
+    report = compare(source, rendered('', table_rows=flat))
+    assert report['status'] == 'passed'
+    assert report['direct_comparison'][0]['department_links']['expected_count'] == 3
+
+
+def test_raw_source_links_override_a_renderer_and_model_sharing_the_same_error():
+    raw = [['연번', '학과', '교실', '연번', '학과', '교실'],
+           ['1', '법학과', '2-1', '2', '역사학과', '2-2']]
+    wrong = [['연번', '학과', '교실'], ['1', '법학과', '2-2'], ['2', '역사학과', '2-1']]
+    source = [{'id': 's1', 'text': '', 'table_rows': wrong, 'original_table_rows': raw}]
+    report = compare(source, rendered('', table_rows=wrong))
+    assert 'department_classroom_mismatch' in {f['code'] for f in report['findings']}
+
+
+def test_duplicate_department_row_cannot_satisfy_one_to_one_preservation():
+    rows = [['연번', '학과', '교실'], ['1', '법학과', '2-1'], ['2', '역사학과', '2-2']]
+    source = [{'id': 's1', 'text': '', 'table_rows': rows}]
+    got = [rows[0], rows[1], rows[1]]
+    assert 'department_classroom_mismatch' in {f['code'] for f in compare(source, rendered('', table_rows=got))['findings']}
+
+
+def test_combined_verdict_cannot_hide_rules_or_raw_model_answers():
+    from moa.verification import combine_verdict
+    rule = compare(paragraph('반드시 2개 선택'), rendered('반드시 1개 선택'))
+    model = {'status': 'completed', 'criteria': {'conditions': {'model_label': 'preserved', 'label': 'preserved'}}}
+    result = combine_verdict(rule, [model], browser_ok=True)
+    assert result['status'] == 'needs_review'
+    assert result['model_labels'] == ['preserved']
+    assert result['rule_status'] == 'needs_review'
+    assert not result['human_approved'] and not result['auto_publish_enabled']
+    assert combine_verdict({'status': 'passed', 'findings': []}, [], browser_ok=True)['status'] == 'needs_review'
+
+
+def test_equivalent_critical_formatting_is_not_an_error():
+    source = paragraph('마감 2026. 10. 30. 오후 5시, 12,000원, 2개 선택')
+    got = rendered('마감 2026-10-30 17:00, 12000원, 2개 선택')
+    assert compare(source, got)['status'] == 'passed'
+
+
+def test_short_numeric_dates_and_spaced_selection_units_are_structural_facts():
+    report = compare(paragraph('신청 10. 30. 17:00까지 2 과목 선택'),
+                     rendered('신청 10. 31. 18:00까지 1 과목 선택'))
+    assert {'date_mismatch', 'time_mismatch', 'selection_mismatch'} <= {f['code'] for f in report['findings']}
+
+
+def test_repeated_table_reflow_cannot_discard_a_preamble_condition():
+    source = [{'id': 's1', 'text': '', 'table_rows': [
+        ['선착순 마감'], ['연번','학과','교실','연번','학과','교실'],
+        ['1','법학과','2-1','2','역사학과','2-2']]}]
+    got = rendered('', table_rows=[['연번','학과','교실'],['1','법학과','2-1'],['2','역사학과','2-2']])
+    assert compare(source, got)['status'] == 'needs_review'
+
+
+def test_caption_and_footnote_date_changes_are_reported_as_dates():
+    source = [{'id':'s1','text':'','table_rows':[['대상','금액'],['1학년','1000원']], 'note':'마감 10월 30일'}]
+    got = rendered('',table_rows=[['대상','금액'],['1학년','1000원']],note='마감 10월 31일')
+    assert 'date_mismatch' in {f['code'] for f in compare(source,got)['findings']}
+
+
+def test_equivalent_clock_padding_and_currency_spaces_do_not_raise_false_alerts():
+    assert compare(paragraph('오전 9시 참가비 12,000 원'),rendered('9:00 참가비 12000원'))['status']=='passed'

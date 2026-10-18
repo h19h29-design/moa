@@ -63,7 +63,8 @@ def source_inventory(store, data):
                     complete = False
             elif b['type'] == 'table':
                 table, rule = mobile.repeated_columns(copy.deepcopy(b['table']))
-                source.update(table_rows=table_rows(table), caption=table.get('caption', ''), note='')
+                source.update(table_rows=table_rows(table), original_table_rows=table_rows(b['table']),
+                              caption=table.get('caption', ''), note='')
                 source['text'] = '\n'.join(' / '.join(row) for row in source['table_rows'])
                 if source['caption']:
                     source['text'] = source['caption'] + '\n' + source['text']
@@ -79,12 +80,14 @@ def source_inventory(store, data):
             'boundary_evidence': boundaries}
 
 
-def section_parts(source, rendered):
+def section_parts(source, rendered, *, rows_per_part=4):
     """Split by complete rows, repeating headers/crossing merges and footnotes.
 
     Coverage indexes refer to the unsplit parent. Original and DOM rows are
     sliced by the same indexes; values are never repaired from the source.
     """
+    if type(rows_per_part) is not int or not 1 <= rows_per_part <= 4:
+        raise ValueError('table row batch must be between 1 and 4')
     sid = source['id']
     def part(left, right, covered, context):
         return {'parent_source_id': sid, 'source_text': left, 'render_text': right,
@@ -99,7 +102,8 @@ def section_parts(source, rendered):
     if len(left) < 2:
         ranges = [list(range(len(left)))]
     else:
-        ranges = [list(range(start, min(start + 4, len(left)))) for start in range(1, len(left), 4)]
+        ranges = [list(range(start, min(start + rows_per_part, len(left))))
+                  for start in range(1, len(left), rows_per_part)]
     parts = []
     for rows in ranges:
         context = {0} - set(rows) if left else set()

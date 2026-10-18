@@ -8,6 +8,20 @@ from moa.extract import html_document
 from test_pilot import browser_fixture, ready, document
 
 
+def test_inventory_keeps_original_repeated_cells_independent_of_reflow(tmp_path):
+    raw = ('<html><table><tr><th>연번</th><th>학과</th><th>교실</th>'
+           '<th>연번</th><th>학과</th><th>교실</th></tr><tr><td>1</td><td>법학과</td>'
+           '<td>2-1</td><td>2</td><td>역사학과</td><td>2-2</td></tr></table></html>').encode()
+    with Store(tmp_path) as s:
+        mid = mobile.create_upload(s, [('안내.html', raw)])
+        rev = mobile.generate(s, mid)
+        source = pilot.source_inventory(s, rev['data'])['sources'][0]
+        assert source['original_table_rows'] == [
+            ['연번', '학과', '교실', '연번', '학과', '교실'],
+            ['1', '법학과', '2-1', '2', '역사학과', '2-2']]
+        assert len(source['table_rows']) == 3
+
+
 def test_editor_comment_is_not_notice_text_but_visible_literal_is_preserved():
     result = html_document('<html><div><!--[data-hwpjson]{"private_editor_state": "X"}-->'
                            '<p>신청 마감은 10월 30일입니다.</p>'
@@ -62,6 +76,18 @@ def test_long_table_splits_with_headers_notes_and_parent_coverage():
         assert p['parent_source_id'] == 's0001'
         assert p['source_sha256'] == pilot.sha(p['source_text'].encode())
     assert seen == list(range(1, 18))
+
+
+def test_row_bounded_retry_retains_full_cells_headers_and_crossing_merge_context():
+    source={'id':'s1','text':'','table_rows':[['구분','안내'],['대상','긴 조건 '*100],['','제외 조건']],
+            'table_geometry':[[1,0,2,1]],'caption':'안내','note':'마감일 준수'}
+    observed={**source,'visible_text':''}
+    parts=pilot.section_parts(source,observed,rows_per_part=1)
+    assert len(parts)==2
+    assert parts[0]['source_text']==parts[0]['render_text']
+    assert '긴 조건 '*99 in parts[0]['source_text']
+    assert parts[1]['covered_rows']==[2] and parts[1]['context_rows']==[0,1]
+    assert '제외 조건' in parts[1]['source_text'] and parts[1]['source_text'].endswith('마감일 준수')
 
 
 def test_changed_row_cannot_disappear_during_split():
