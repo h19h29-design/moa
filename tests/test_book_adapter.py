@@ -5,6 +5,8 @@ import sys
 import types
 import pytest
 import subprocess
+import json
+import urllib.error
 
 from moa import worker_contract as wc
 from moa.worker_handoff import questions, CRITERIA, rubric_sha256
@@ -47,6 +49,52 @@ def test_only_one_early_resource_retry_not_quality_tuning_is_allowed():
     assert not mod.resource_retry_allowed(parent, {'optimizer_updates':1}, completed=True, retries=0)
     assert not mod.resource_retry_allowed(parent, {'optimizer_updates':1}, completed=False, retries=1)
     assert not mod.resource_retry_allowed({'status':'interrupted','reason':'quality_failed'}, {'optimizer_updates':1}, completed=False, retries=0)
+
+
+def test_complete_ack_must_confirm_the_exact_lease_and_fence():
+    mod = adapter()
+    job = dict(job_id='job-pilot-synthetic', lease_id='lease-1', fencing_token=2,
+               input_sha256='a'*64, idempotency_key='b'*64)
+    mod.confirm_ack({'accepted':True, **job}, job)
+    # v1 NAS ACK has three mandatory identity fields. Lease/fence are checked
+    # server-side before acceptance; if echoed by a future peer, verify them.
+    required = ('job_id', 'input_sha256', 'idempotency_key')
+    mod.confirm_ack({'accepted':True, **{k:job[k] for k in required}}, job)
+    for key in required:
+        with pytest.raises(ValueError, match='ack_not_verified'):
+            mod.confirm_ack({'accepted':True, **{k:job[k] for k in required if k != key}}, job)
+    for key in job:
+        wrong = {'accepted':True, **job, key:'different'}
+        with pytest.raises(ValueError, match='ack_not_verified'):
+            mod.confirm_ack(wrong, job)
+
+
+def test_lost_complete_response_keeps_durable_outbox_not_failed_job(tmp_path, monkeypatch):
+    mod = adapter(); monkeypatch.setattr(mod, 'ROOT', tmp_path)
+    job = dict(job_id='job-pilot-synthetic', lease_id='lease-1', fencing_token=2,
+               input_sha256='a'*64, idempotency_key='b'*64)
+    folder = tmp_path/'runs/job-pilot-synthetic-2'; folder.mkdir(parents=True)
+    (folder/'result.json').write_text(json.dumps({**job, 'message_type':'result'}))
+    class Client:
+        worker = 'synthetic-worker'
+        def call(self, *args): pytest.fail('durable complete must replay before fail')
+    assert mod.handle_job_error(Client(), job, urllib.error.URLError('synthetic_disconnect')) == 'pending_ack'
+
+
+def test_transient_disconnect_before_result_requeues_with_same_fencing(tmp_path, monkeypatch):
+    mod = adapter(); monkeypatch.setattr(mod, 'ROOT', tmp_path)
+    job = dict(job_id='job-pilot-synthetic', lease_id='lease-1', fencing_token=2)
+    class Client:
+        worker = 'synthetic-worker'
+        def call(self, route, body): self.route, self.body = route, body
+    client = Client()
+    mod.handle_job_error(client, job, urllib.error.URLError('synthetic_disconnect'))
+    assert client.body['retryable'] is True
+    assert client.body['fencing_token'] == 2
+    mod.handle_job_error(client, job, ValueError('source_manifest_not_verified'))
+    assert client.body['retryable'] is False
+    mod.handle_job_error(client, job, urllib.error.HTTPError('http://localhost',403,'forbidden',{},None))
+    assert client.body['retryable'] is False
 
 
 def test_book_raw_labels_and_probabilities_are_not_replaced_by_rule_labels(monkeypatch):

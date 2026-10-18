@@ -1,6 +1,7 @@
 """Bounded MacBook protocol adapter, reusing its installed LAYA without replacing it.
 
-Run in the existing venv-smoke; no installs, external models, training or promotion.
+Run in the existing venv-smoke; no installs, external models or promotion.
+Training is a separate explicit, resource-gated command, never a daemon claim.
 The older daemon cannot claim these jobs without this executor's code identity.
 """
 from __future__ import annotations
@@ -35,6 +36,17 @@ def claimed_job(response):
     if not isinstance(response, dict) or response.get('ok') is not True or not isinstance(response.get('job'), dict):
         raise ValueError('invalid_claim_response_wrapper')
     return response['job']
+
+
+ACK_KEYS = ('job_id', 'lease_id', 'fencing_token', 'input_sha256', 'idempotency_key')
+
+
+def confirm_ack(ack, job):
+    required = ('job_id', 'input_sha256', 'idempotency_key')
+    if not isinstance(ack, dict) or ack.get('accepted') is not True or any(
+            key not in ack or ack[key] != job[key] for key in required) or any(
+            key in ack and ack[key] != job[key] for key in ('lease_id','fencing_token')):
+        raise ValueError('result_ack_not_verified')
 
 
 def identity():
@@ -137,8 +149,7 @@ class Client:
         envelope = {**job, 'message_type': 'result', 'payload': result}
         private_json(folder / 'result.json', envelope)
         ack = self.call('/v1/worker/jobs/' + job['job_id'] + '/complete', {'worker_id': self.worker, 'result': envelope})
-        if not ack.get('accepted') or any(ack.get(k) != job[k] for k in ('job_id', 'input_sha256', 'idempotency_key')):
-            raise ValueError('result_ack_not_verified')
+        confirm_ack(ack, job)
         private_json(folder / 'ack.json', ack)
         return {'job_id': job['job_id'], 'accepted': True, 'model_status': local['status'],
                 'verdict': ack['verdict'], 'actual_model_called': bool(local.get('model_called'))}
@@ -329,13 +340,30 @@ def flush_results(client):
         try:
             ack = client.call('/v1/worker/jobs/' + result['job_id'] + '/complete',
                               {'worker_id':client.worker, 'result':result})
-            if not ack.get('accepted') or any(ack.get(k) != result[k] for k in
-                    ('job_id','lease_id','fencing_token','input_sha256','idempotency_key')):
-                raise ValueError('outbox_ack_not_verified')
+            confirm_ack(ack, result)
             private_json(folder / 'ack.json', ack)
         except urllib.error.HTTPError as e:
             if e.code != 409: raise
             private_json(folder / 'stale.json', {'status':'stale', 'http_status':409})
+
+
+def handle_job_error(client, job, error):
+    folder = ROOT / 'runs' / (job['job_id'] + '-' + str(job['fencing_token']))
+    path = folder / 'result.json'
+    if path.is_file():
+        pending = json.loads(path.read_bytes())
+        if pending.get('message_type') == 'result' and all(pending.get(k) == job.get(k) for k in ACK_KEYS):
+            # A lost HTTP response is not an inference failure. Preserve the
+            # lease so flush_results can replay the exact idempotent envelope.
+            return 'pending_ack'
+    transient = isinstance(error, (urllib.error.URLError, TimeoutError, ConnectionError)) or (
+        isinstance(error, ValueError) and str(error) == 'heartbeat_not_confirmed')
+    if isinstance(error, urllib.error.HTTPError):
+        transient = error.code == 429 or 500 <= error.code < 600
+    client.call('/v1/worker/jobs/'+job['job_id']+'/fail', {'worker_id':client.worker,
+                'lease_id':job['lease_id'],'fencing_token':job['fencing_token'],
+                'code':'standing_execution_error','retryable':transient})
+    return 'requeued' if transient else 'failed'
 
 
 def standing_worker():
@@ -368,9 +396,7 @@ def standing_worker():
             except Exception as error:
                 if job and client:
                     try:
-                        client.call('/v1/worker/jobs/'+job['job_id']+'/fail', {'worker_id':client.worker,
-                                    'lease_id':job['lease_id'],'fencing_token':job['fencing_token'],
-                                    'code':'standing_execution_error','retryable':False})
+                        handle_job_error(client, job, error)
                     except Exception: pass
                 status('deferred_connection_or_policy',error_type=type(error).__name__)
                 client = None; last_ready = 0; stop.wait(15)

@@ -19,7 +19,7 @@ from .core import Store, digest, encode, kst_now, write_jsonl
 from .extract import LAYOUTS, PARSER_VERSION, detect_kind, html_document, table_pattern
 from .render import CSS, render_mobile, render_page
 
-CONVERTER_VERSION = 'moa-notice-v2-shadow-dom'
+CONVERTER_VERSION = 'moa-notice-v3-masthead-flow'
 ROLES = ('convert', 'attachment')
 REASONS = {'unconfirmed': '아직 미확인', 'missing': '내용 누락',
            'table': '표 관계 오류', 'readability': '읽기 불편',
@@ -180,6 +180,21 @@ def explicit_blank_form(table: dict) -> bool:
     return fields >= 3 and sum(not c['text'].strip() for c in cells) >= 2
 
 
+def masthead_layout(table: dict) -> bool:
+    """Explicit school banner + full-width prose, not dimensions-only guessing."""
+    if table.get('geometry_uncertain') or table.get('nested') or table.get('cols', 0) < 2:
+        return False
+    cells = table.get('cells', [])
+    banner = [c for c in cells if c['row'] < 2 and re.sub(r'\s+', '', c.get('text','')) == '가정통신문']
+    if not banner:
+        return False
+    end = max(c['row'] + c.get('rowspan', 1) for c in cells if c['row'] <= banner[0]['row'])
+    body = [c for c in cells if c['row'] >= end and c.get('text','').strip()]
+    return bool(body) and all(c['col'] == 0 and c.get('colspan',1) == table['cols'] for c in body) and any(
+        len(c['text']) >= 200 and len(c.get('blocks', [])) >= 2 and
+        all(b['type'] == 'paragraph' for b in c['blocks']) for c in body)
+
+
 def ordered_blocks(result: dict) -> tuple[list, list]:
     """Reflow layout cells but keep real data tables and source pointers."""
     tables = result.get('tables', [])
@@ -201,7 +216,7 @@ def ordered_blocks(result: dict) -> tuple[list, list]:
                 table = tables[i]
                 cells = table.get('cells', [])
                 empty = sum(not c.get('text','').strip() for c in cells)
-                layout = table.get('nested') or table.get('cols') == 1 or \
+                layout = masthead_layout(table) or table.get('nested') or table.get('cols') == 1 or \
                     (cells and empty > len(cells)/3) or table.get('rows') == 1
                 if layout and not explicit_blank_form(table):
                     for cell in sorted(cells,key=lambda c:(c['row'],c['col'])):

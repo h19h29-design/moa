@@ -73,6 +73,20 @@ def test_changed_row_cannot_disappear_during_split():
     assert len([r for p in parts for r in p['covered_rows']]) == 17
 
 
+def test_explicit_masthead_outer_table_reflows_paragraphs_not_real_data_rows():
+    body = ('<html><table><tr><td>교훈</td><td>가정통신문</td><td>담당 부서</td></tr>'
+            '<tr><td colspan="3"><p>안내 제목</p><p>'+ '조건을 반드시 확인하세요. '*25 +
+            '</p><p>신청 마감은 10월 30일 17:00입니다.</p></td></tr></table></html>')
+    content, _ = mobile.ordered_blocks(html_document(body))
+    assert all(b['type'] == 'paragraph' for b in content)
+    assert content[-1]['text'] == '신청 마감은 10월 30일 17:00입니다.'
+    assert '조건을 반드시 확인하세요.' in content[-2]['text']
+    # Same masthead above actual rows is NOT sufficient evidence to flatten.
+    data = body.replace('<tr><td colspan="3">','<tr><td>2학년</td><td>12,000원</td><td>')
+    blocks, _ = mobile.ordered_blocks(html_document(data))
+    assert blocks[0]['type'] == 'table'
+
+
 def test_refresh_archives_manifest_and_does_not_mutate_originals(tmp_path):
     with Store(tmp_path) as s:
         mid = document(s); pilot.prepare(s, [mid])
