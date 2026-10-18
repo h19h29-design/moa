@@ -12,6 +12,9 @@ from pathlib import Path
 import sys
 import threading
 import time
+import signal
+import subprocess
+import fcntl
 import urllib.request
 import urllib.error
 
@@ -63,7 +66,7 @@ class Client:
             if len(content) > 1048576: raise ValueError('response_too_large')
         return content if raw else json.loads(content)
 
-    def ready(self):
+    def ready(self, *, standing=False):
         from workers.laya_local import policy as p
         h = self.call('/v1/worker/handoff')
         schema = ROOT / 'app/contracts/worker-envelope.schema.json'
@@ -82,8 +85,8 @@ class Client:
                'rubric_sha256': digest(p.canonical(actual_questions)), 'questions': actual_questions,
                'canonical_vectors': vectors, 'source_block_hash': 'sha256-text-utf8',
                'max_artifact_bytes': 1048576, 'validator_hash': h['validator_hash'],
-               'worker_code_sha256': self.code, 'daemon_ready': False,
-               'execution_mode': 'bounded_pull_client', 'executor_ready': True}
+               'worker_code_sha256': self.code, 'daemon_ready': standing,
+               'execution_mode': 'standing_pull_client' if standing else 'bounded_pull_client', 'executor_ready': True}
         answer = self.call('/v1/worker/ready', ack)
         if not answer.get('accepted'): raise ValueError('readiness_not_accepted')
         private_json(ROOT / 'incoming/WORKER_READY.json', ack)
@@ -148,6 +151,175 @@ def private_json(path, data):
     path.chmod(0o600)
 
 
+def training_stop_reason(resources, elapsed):
+    if elapsed >= 2700: return 'wall_budget_exceeded'
+    if resources.get('train_allowed') is not True: return 'resource_or_pause_gate'
+    return None
+
+
+def supervise_training(child, resources):
+    started = time.monotonic(); stopped = threading.Event(); reason = None
+    signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    previous = {s:signal.signal(s, lambda *_:stopped.set()) for s in signals}
+    try:
+        while child.poll() is None:
+            reason = 'parent_stopped' if stopped.is_set() else training_stop_reason(resources(), time.monotonic()-started)
+            if reason: break
+            stopped.wait(2)
+        return reason
+    finally:
+        if child.poll() is None:
+            child.terminate()
+            grace = max(0, min(20, 2700-(time.monotonic()-started)))
+            try: child.wait(timeout=grace)
+            except subprocess.TimeoutExpired: child.kill(); child.wait()
+        for s, handler in previous.items(): signal.signal(s, handler)
+
+
+def shard_path(folder, name):
+    import re
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+\.jsonl', name):
+        raise ValueError('shard_path')
+    p = folder / name
+    if p.is_symlink(): raise ValueError('shard_path')
+    return p
+
+
+def bundle_rows():
+    from workers.laya_local import policy as p
+    folder = ROOT / 'incoming/moa-ko-synthetic-20261018-v1'
+    raw = (folder / 'TRAINING_BUNDLE_READY.json').read_bytes()
+    receipt = json.loads((folder / 'SSH_RECEIPT.json').read_bytes())
+    if digest(raw) != receipt['manifest_sha256']: raise ValueError('training_manifest_hash')
+    manifest = json.loads(raw)
+    if (manifest.get('maximum_epochs') != 1 or manifest.get('maximum_active_seconds') != 2700 or
+            manifest.get('maximum_optimizer_updates') != 200):
+        raise ValueError('training_budget_manifest')
+    rows = []
+    for shard in manifest['shards']:
+        content = shard_path(folder, shard['file']).read_bytes()
+        if len(content) > 524288 or len(content) != shard['bytes'] or digest(content) != shard['sha256']:
+            raise ValueError('training_shard_hash')
+        parsed = [json.loads(line) for line in content.splitlines() if line.strip()]
+        if len(parsed) != shard['rows']: raise ValueError('training_shard_rows')
+        rows.extend(parsed)
+    p.validate_dataset(rows, manifest, minimum=True)
+    return rows, manifest, digest(raw)
+
+
+def train_child(folder):
+    from workers.laya_local import ml
+    rows, manifest, mhash = bundle_rows()
+    request = json.loads((folder / 'reservation.json').read_bytes())
+    if request['manifest_sha256'] != mhash: raise ValueError('training_manifest_changed')
+    result = ml.train(rows, manifest, ROOT / 'candidates' / folder.name)
+    private_json(folder / 'training-result.json', result)
+
+
+def train_bundle():
+    """Explicit local training, not a fictitious model-upload API job.
+
+    The parent owns the device lock and enforces resources and a45min wall
+    deadline across preflight, baseline evaluation, training, reload and eval.
+    Existing trainer weights/configuration and champion remain untouched.
+    """
+    from workers.laya_local import runtime, policy
+    rows, manifest, mhash = bundle_rows()
+    folder = ROOT / 'runs' / ('train-pilot-' + mhash[:20])
+    if (folder / 'training-result.json').is_file():
+        result = json.loads((folder / 'training-result.json').read_bytes())
+        return {'run_id':folder.name, 'status':result['status'], 'duplicate':True}
+    if folder.exists(): raise ValueError('training_attempt_already_reserved')
+    runtime.run_limits(policy.digest(rows), rows)
+    if training_stop_reason(runtime.resources(), 0): raise ValueError('training_resources_not_ready')
+    with runtime.exclusive(ROOT / 'device.lock'):
+        folder.mkdir(mode=0o700, parents=True)
+        ledger = {identity:r['meta']['split'] for r in rows for identity in
+                  (r['meta']['original_group_id'],r['meta']['family_group_id'],r['meta']['source_sha256'])}
+        import datetime
+        private_json(folder / 'reservation.json', {'manifest_sha256':mhash, 'dataset_sha256':policy.digest(rows),
+                     'decision_signatures':runtime.decision_signatures(rows), 'split_ledger':ledger,
+                     'reserved_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                     'max_wall_seconds':2700, 'max_epochs':1, 'max_updates':128, 'encoder_frozen':True})
+        started = time.monotonic(); reason = None
+        logpath = folder / 'training.log'
+        with logpath.open('ab') as log:
+            logpath.chmod(0o600)
+            child = subprocess.Popen([sys.executable, __file__, 'train-child', '--run-folder', str(folder)],
+                                     stdout=log, stderr=log, cwd=ROOT / 'app')
+            reason = supervise_training(child, runtime.resources)
+        outcome = {'run_id':folder.name, 'status':'completed' if child.returncode == 0 else 'interrupted',
+                   'reason':reason, 'exit_code':child.returncode, 'seconds':time.monotonic()-started,
+                   'manifest_sha256':mhash, 'champion_changed':False}
+        private_json(folder / 'PARENT_RESULT.json', outcome)
+        return outcome
+
+
+def device_available():
+    with (ROOT / 'device.lock').open('a') as f:
+        try: fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError: return False
+        fcntl.flock(f, fcntl.LOCK_UN)
+        return True
+
+
+def flush_results(client):
+    """Replay lost complete responses, never silently discard an old lease."""
+    for folder in sorted((ROOT / 'runs').glob('job-pilot-*')):
+        path = folder / 'result.json'
+        if not path.is_file() or (folder / 'ack.json').exists() or (folder / 'stale.json').exists(): continue
+        result = json.loads(path.read_bytes())
+        try:
+            ack = client.call('/v1/worker/jobs/' + result['job_id'] + '/complete',
+                              {'worker_id':client.worker, 'result':result})
+            if not ack.get('accepted') or any(ack.get(k) != result[k] for k in
+                    ('job_id','lease_id','fencing_token','input_sha256','idempotency_key')):
+                raise ValueError('outbox_ack_not_verified')
+            private_json(folder / 'ack.json', ack)
+        except urllib.error.HTTPError as e:
+            if e.code != 409: raise
+            private_json(folder / 'stale.json', {'status':'stale', 'http_status':409})
+
+
+def standing_worker():
+    from workers.laya_local import runtime, ml
+    stop = threading.Event(); agent = None; client = None; last_ready = 0
+    for sig in (signal.SIGTERM, signal.SIGINT): signal.signal(sig, lambda *_: stop.set())
+    def status(state, **extra):
+        private_json(ROOT / 'status.json', {'state':state,'execution_mode':'standing_pull_client',
+                     'pid':os.getpid(),'updated_at':time.time(),'auto_promotion':False, **extra})
+    with runtime.exclusive(ROOT / 'worker.lock'):
+        while not stop.is_set():
+            job = None
+            try:
+                if (ROOT / 'PAUSED').exists(): status('paused'); stop.wait(5); continue
+                resources = runtime.resources()
+                if not resources['verify_allowed'] or not device_available():
+                    status('awaiting_resources',resources=resources); stop.wait(5); continue
+                if client is None: client = Client()
+                if time.monotonic() - last_ready >= 60:
+                    client.ready(standing=True); last_ready = time.monotonic()
+                flush_results(client)
+                job = claimed_job(client.call('/v1/worker/claim', {'worker_id':client.worker,
+                                  'kinds':['verify'],'worker_code_sha256':client.code}))
+                if not job:
+                    status('ready',worker_code_sha256=client.code,daemon_ready=True); stop.wait(10); continue
+                status('verifying',job_id=job['job_id'],daemon_ready=True)
+                if agent is None: agent = ml.load_agent()
+                answer = client.verify(job, agent)
+                status('ready',last_job=answer,daemon_ready=True,worker_code_sha256=client.code)
+            except Exception as error:
+                if job and client:
+                    try:
+                        client.call('/v1/worker/jobs/'+job['job_id']+'/fail', {'worker_id':client.worker,
+                                    'lease_id':job['lease_id'],'fencing_token':job['fencing_token'],
+                                    'code':'standing_execution_error','retryable':False})
+                    except Exception: pass
+                status('deferred_connection_or_policy',error_type=type(error).__name__)
+                client = None; last_ready = 0; stop.wait(15)
+        status('stopped')
+
+
 def result_payload(local, job, validator_hash):
     from workers.laya_local import policy as p
     criteria = local.get('criteria', {})
@@ -167,13 +339,21 @@ def result_payload(local, job, validator_hash):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['ready', 'run', 'receipt'])
+    parser.add_argument('action', choices=['ready', 'run', 'receipt', 'daemon', 'train', 'train-child'])
+    parser.add_argument('--run-folder', type=Path)
     parser.add_argument('--max-jobs', type=int, default=100)
     parser.add_argument('--max-seconds', type=int, default=1800)
     args = parser.parse_args()
     if not 1 <= args.max_jobs <= 100 or not 1 <= args.max_seconds <= 2700:
         raise ValueError('bounded_run_limits')
     os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1', WANDB_DISABLED='true')
+    if args.action == 'daemon': standing_worker(); return
+    if args.action == 'train': print(json.dumps(train_bundle())); return
+    if args.action == 'train-child':
+        folder = args.run_folder.resolve()
+        if folder.parent != (ROOT / 'runs').resolve() or not folder.name.startswith('train-pilot-'):
+            raise ValueError('training_run_path')
+        train_child(folder); return
     client = Client()
     if args.action == 'receipt':
         path = ROOT / 'incoming/moa-ko-synthetic-20261018-v1/SSH_RECEIPT.json'

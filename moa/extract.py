@@ -8,13 +8,13 @@ import sys
 import zipfile
 from pathlib import Path
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from defusedxml import ElementTree
 
 from .core import digest, encode
 
 LAYOUTS = ('key_value_cards','timeline','grade_cards','comparison','read_only_form','scroll_table')
-PARSER_VERSION = 'moa-local-v4'
+PARSER_VERSION = 'moa-local-v5-visible-html'
 
 
 def detect_kind(data: bytes, filename: str = '') -> str:
@@ -49,6 +49,10 @@ def _span(value) -> int:
 
 def html_document(html: str) -> dict:
     soup=BeautifulSoup(html,'html.parser')
+    # Editor state in comments is not visible notice content. Do not remove a
+    # visible paragraph merely because it contains an editor-like string.
+    for comment in soup.find_all(string=lambda node: isinstance(node, Comment)):
+        comment.extract()
     for bad in soup.select('script,style,nav'):
         bad.decompose()
     # A form can contain submission instructions. Keep its visible text while

@@ -169,6 +169,17 @@ def _decorative(text: str) -> bool:
         bool(re.fullmatch(r'([가-힣]{2,30}학교)(?:\1|[·ㆍ])*', compact) and compact.count('학교') >= 5)
 
 
+def explicit_blank_form(table: dict) -> bool:
+    """Machine role evidence, never human approval or a completed privacy audit."""
+    cells = table.get('cells', [])
+    top = [re.sub(r'\s+', '', c['text']) for c in cells if c['row'] == 0]
+    if not any(re.fullmatch(r'[\w가-힣·ㆍ()\-]{0,70}(?:신청서|동의서)', text) for text in top):
+        return False
+    text = re.sub(r'\s+', '', ' '.join(c['text'] for c in cells))
+    fields = sum(label in text for label in ('성명', '보호자', '연락처', '서명', '생년월일', '계좌번호'))
+    return fields >= 3 and sum(not c['text'].strip() for c in cells) >= 2
+
+
 def ordered_blocks(result: dict) -> tuple[list, list]:
     """Reflow layout cells but keep real data tables and source pointers."""
     tables = result.get('tables', [])
@@ -192,7 +203,7 @@ def ordered_blocks(result: dict) -> tuple[list, list]:
                 empty = sum(not c.get('text','').strip() for c in cells)
                 layout = table.get('nested') or table.get('cols') == 1 or \
                     (cells and empty > len(cells)/3) or table.get('rows') == 1
-                if layout:
+                if layout and not explicit_blank_form(table):
                     for cell in sorted(cells,key=lambda c:(c['row'],c['col'])):
                         blocks = cell.get('blocks') or [{'type':'paragraph','text':cell.get('text','')}]
                         out.extend(flatten(blocks, (*ancestors,i)))
@@ -290,7 +301,7 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
     from .learn import extract_asset
     row = notice_row(store,ident)
     files = file_roles(json.loads(row['files']), edits) if edits is not None else json.loads(row['files'])
-    blocks, warnings, excluded, audit, source_results = [], [], [], [], []
+    blocks, warnings, excluded, audit, source_results, boundaries = [], [], [], [], [], []
     rules = approved_rules(store)
     for file in files:
         if file['role'] == 'attachment': continue
@@ -331,7 +342,14 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
                     break
         if file.get('scope') == 'mixed' and form_at is None:
             warnings.append({'code':'boundary','file_id':file['id'],'message':'혼합 문서의 서식 시작 구역을 지정하세요.'})
-        if form_at is not None and not file.get('boundary_confirmed'):
+        machine_boundary = form_at is not None and content[form_at]['type'] == 'table' and \
+            explicit_blank_form(content[form_at]['table'])
+        if machine_boundary:
+            boundaries.append({'method':'explicit_blank_form_v1','file_id':file['id'],
+                               'source_block':form_at,'original_sha256':file['sha256'],
+                               'table_sha256':digest(encode(content[form_at]['table']).encode()),
+                               'human_confirmed':False})
+        if form_at is not None and not file.get('boundary_confirmed') and not machine_boundary:
             warnings.append({'code':'boundary','file_id':file['id'],
                              'message':f'안내/서식 경계 후보는 구역 {form_at}입니다. 원문 대조 후 경계를 확인하세요.'})
         for i,b in enumerate(content):
@@ -360,7 +378,7 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
         warnings.append({'code':'empty','message':'읽을 수 있는 안내 내용이 없습니다.'})
     return {'title':title.strip()[:300] or row['title'], 'files':files, 'blocks':blocks,
             'warnings':warnings, 'excluded':excluded, 'sources':source_results,
-            'recommendations':audit, 'parser_version':PARSER_VERSION,
+            'recommendations':audit, 'boundary_evidence':boundaries, 'parser_version':PARSER_VERSION,
             'converter_version':CONVERTER_VERSION, 'human_corrected':False}
 
 

@@ -3,9 +3,40 @@ import importlib.util
 from pathlib import Path
 import sys
 import types
+import pytest
+import subprocess
 
 from moa import worker_contract as wc
 from moa.worker_handoff import questions, CRITERIA, rubric_sha256
+
+
+def adapter():
+    spec = importlib.util.spec_from_file_location('book_adapter', Path(__file__).parents[1] / 'scripts/moa-book-pilot.py')
+    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+    return mod
+
+
+def test_training_budget_and_resource_gates_are_not_overridden():
+    mod = adapter()
+    assert mod.training_stop_reason({'train_allowed': True}, 120) is None
+    assert mod.training_stop_reason({'train_allowed': True}, 2700) == 'wall_budget_exceeded'
+    assert mod.training_stop_reason({'train_allowed': False}, 0) == 'resource_or_pause_gate'
+
+
+def test_dataset_shard_path_cannot_escape_bundle(tmp_path):
+    mod = adapter()
+    with pytest.raises(ValueError, match='shard_path'):
+        mod.shard_path(tmp_path, '../secret')
+    with pytest.raises(ValueError, match='shard_path'):
+        mod.shard_path(tmp_path, '/tmp/secret')
+    assert mod.shard_path(tmp_path, 'train-001.jsonl') == tmp_path / 'train-001.jsonl'
+
+
+def test_training_supervisor_reaps_only_its_child_on_resource_loss():
+    mod = adapter()
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
+    assert mod.supervise_training(child, lambda:{'train_allowed':False}) == 'resource_or_pause_gate'
+    assert child.poll() is not None
 
 
 def test_book_raw_labels_and_probabilities_are_not_replaced_by_rule_labels(monkeypatch):

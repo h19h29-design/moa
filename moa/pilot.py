@@ -35,6 +35,9 @@ def source_inventory(store, data):
     """
     from .learn import extract_asset
     sources, excluded, parser = [], [], []
+    boundaries = data.get('boundary_evidence', [])
+    machine_boundaries = {(b['file_id'], b['source_block']) for b in boundaries
+                          if b.get('method') == 'explicit_blank_form_v1'}
     complete = True
     forms = {(x['file_id'], x['source_block']) for x in data['excluded'] if x['reason'] == 'form'}
     for f in data['files']:
@@ -55,7 +58,8 @@ def source_inventory(store, data):
                       'file_id': f['id'], 'text': b.get('text', '')}
             if (f['id'], index) in forms:
                 source.update(role='form', attachment_id=f['id'])
-                if not f.get('boundary_confirmed'):
+                if not f.get('boundary_confirmed') and not any(fid == f['id'] and start <= index
+                        for fid, start in machine_boundaries):
                     complete = False
             elif b['type'] == 'table':
                 table, rule = mobile.repeated_columns(copy.deepcopy(b['table']))
@@ -71,10 +75,47 @@ def source_inventory(store, data):
             sources.append(source)
     complete &= not any(w['code'] in ('boundary', 'incomplete', 'geometry') for w in data['warnings'])
     return {'sources': sources, 'parser_coverage_complete': bool(complete),
-            'human_original_audit': False, 'parsers': parser, 'excluded': excluded}
+            'human_original_audit': False, 'parsers': parser, 'excluded': excluded,
+            'boundary_evidence': boundaries}
 
 
-def prepare(store, identifiers):
+def section_parts(source, rendered):
+    """Split by complete rows, repeating headers/crossing merges and footnotes.
+
+    Coverage indexes refer to the unsplit parent. Original and DOM rows are
+    sliced by the same indexes; values are never repaired from the source.
+    """
+    sid = source['id']
+    def part(left, right, covered, context):
+        return {'parent_source_id': sid, 'source_text': left, 'render_text': right,
+                'covered_rows': covered, 'context_rows': context,
+                'source_sha256': sha(left.encode()), 'render_sha256': sha(right.encode())}
+    if 'table_rows' not in source:
+        return [part(source['text'], rendered['visible_text'], [], [])]
+    left, right = source['table_rows'], rendered.get('table_rows', [])
+    if len(left) != len(right):
+        # Keep the mismatch whole, never hide an added or omitted row by zip().
+        return [part(source['text'], rendered.get('visible_text', ''), list(range(len(left))), [])]
+    if len(left) < 2:
+        ranges = [list(range(len(left)))]
+    else:
+        ranges = [list(range(start, min(start + 4, len(left)))) for start in range(1, len(left), 4)]
+    parts = []
+    for rows in ranges:
+        context = {0} - set(rows) if left else set()
+        # A row-spanning label belongs to every covered row it governs.
+        for row, col, rowspan, colspan in source.get('table_geometry', []):
+            if any(row <= r < row + rowspan for r in rows) and row not in rows:
+                context.add(row)
+        indexes = sorted(context | set(rows))
+        def text(block, values):
+            lines = [block.get('caption', '')] + [' / '.join(values[r]) for r in indexes] + [block.get('note', '')]
+            return '\n'.join(line for line in lines if line)
+        parts.append(part(text(source, left), text(rendered, right), rows, sorted(context)))
+    return parts
+
+
+def prepare(store, identifiers, *, refresh=False):
     api.ensure_worker_tables(store)
     existing = store.db.execute('SELECT count(*) FROM pilot_documents').fetchone()[0]
     new = [i for i in identifiers if not store.db.execute('SELECT 1 FROM pilot_documents WHERE mobile_id=?', (i,)).fetchone()]
@@ -94,6 +135,16 @@ def prepare(store, identifiers):
             if _evaluation(store, row['origin_notice_id']) or any(_file_evaluation(store, f['sha256']) for f in json.loads(row['files'])):
                 raise ValueError('evaluation original or derivative excluded')
         previous = store.db.execute('SELECT * FROM pilot_documents WHERE mobile_id=?', (ident,)).fetchone()
+        if previous and refresh:
+            if row['latest_revision'] != previous['revision_id'] or mobile.revision(store, ident)['data'].get('human_corrected'):
+                raise ValueError('cannot refresh changed or human-corrected pilot revision')
+            store.db.execute('CREATE TABLE IF NOT EXISTS pilot_history('
+                             'mobile_id TEXT,revision_id TEXT,manifest TEXT,archived_at REAL,'
+                             'PRIMARY KEY(mobile_id,revision_id))')
+            with store.db:
+                store.db.execute('INSERT OR IGNORE INTO pilot_history VALUES(?,?,?,?)',
+                                 (ident, previous['revision_id'], previous['manifest'], api._now()))
+            previous = None
         if previous:
             if row['latest_revision'] != previous['revision_id']:
                 raise ValueError('pilot revision changed; explicit re-review required')
@@ -107,7 +158,9 @@ def prepare(store, identifiers):
                         'files': revision['data']['files'], 'auto_pass_enabled': False,
                         'auto_publish_enabled': False, 'final_verdict': 'needs_review'}
             with store.db:
-                store.db.execute('INSERT INTO pilot_documents VALUES(?,?,?,?)',
+                store.db.execute('INSERT INTO pilot_documents VALUES(?,?,?,?)'
+                                 ' ON CONFLICT(mobile_id) DO UPDATE SET revision_id=excluded.revision_id,'
+                                 'manifest=excluded.manifest,created_at=excluded.created_at',
                                  (ident, revision['id'], json.dumps(manifest, ensure_ascii=False), api._now()))
         documents.append({k: manifest[k] for k in ('mobile_id', 'revision_id', 'html_sha256', 'files')})
     output = store.root / 'coordination/PILOT_BROWSER_INPUT.json'
@@ -169,11 +222,48 @@ def ingest_browser(store, observation):
         store.db.execute('INSERT INTO verification_evidence VALUES(?,?,?,?,?,?,?,?,?,?)'
                          ' ON CONFLICT(job_id) DO UPDATE SET rule_report=excluded.rule_report,'
                          'browser_report=excluded.browser_report,updated_at=excluded.updated_at',
-                         ('parent-' + ident, ident, manifest['source_revision'], manifest['revision_id'],
+                         ('parent-' + ident + '-' + manifest['revision_id'][:16], ident, manifest['source_revision'], manifest['revision_id'],
                           manifest['html_sha256'], json.dumps(manifest['rule_report']),
                           json.dumps(observation, ensure_ascii=False), None, 'needs_review', api._now()))
     return {'mobile_id': ident, 'rules': manifest['rule_report']['status'],
             'hard_findings': sum(len(r['findings']) for r in reports), 'human_approved': False}
+
+
+def _publish_part(store, entry, manifest, source, part, index, worker_id):
+    source_id = source['id'] + (f'_p{index:03d}' if 'table_rows' in source else '')
+    src = [{'id': source_id, 'text': part['source_text']}]
+    render = [{'id': 'r1', 'source_refs': [source_id], 'visible_text': part['render_text']}]
+    source_manifest = {'source_revision': manifest['source_revision'], 'scope': 'section', 'complete': True,
+                       'block_sha256': {source_id: part['source_sha256']},
+                       'parent_source_id':source['id'], 'parent_html_sha256':manifest['html_sha256'],
+                       'covered_rows':part['covered_rows'], 'context_rows':part['context_rows']}
+    artifact = api.put_artifact(store, wc.canonical(source_manifest))
+    qs = ['table_relations'] if 'table_rows' in source else ['conditions', 'omission', 'addition']
+    payload = {'scope': 'section', 'file_role': 'notice', 'source_blocks': src, 'rendered_blocks': render,
+               'questions': qs, 'required_context_ids': [source_id],
+               'coverage_manifest': {'expected_blocks': 1, 'provided_blocks': 1},
+               'model_policy': {'checkpoint': 'current', 'max_tokens': 1024, 'vision': False},
+               'deterministic_findings': manifest['rule_report']['viewports'][0]['findings'],
+               'source_manifest_artifact': artifact, 'notice_id': entry['mobile_id'],
+               'parent_html_sha256': manifest['html_sha256'], 'parent_source_complete': manifest['parser_coverage_complete'],
+               'requires_readiness': True, 'require_rubric_hash': True, 'rubric_sha256': rubric_sha256(),
+               'validation_mode': 'shadow', 'auto_pass_enabled': False, 'auto_publish_enabled': False}
+    digest = wc.input_sha256('verify', payload, manifest['source_revision'], manifest['revision_id'], api.RUBRIC_REVISION)
+    job_id = 'job-pilot-' + digest[:32]
+    env = {'contract_version': wc.CONTRACT_VERSION, 'message_type': 'job', 'job_id': job_id,
+           'job_kind': 'verify', 'idempotency_key': digest, 'input_sha256': digest,
+           'lease_id': 'unclaimed', 'fencing_token': 1, 'source_revision': manifest['source_revision'],
+           'render_revision': manifest['revision_id'], 'rubric_revision': api.RUBRIC_REVISION, 'payload': payload}
+    answer = api.enqueue_job(store, env, target_worker_id=worker_id)
+    if not answer.get('ok'):
+        raise ValueError('pilot enqueue rejected: ' + ';'.join(answer.get('errors', [])))
+    with store.db:
+        store.db.execute('INSERT OR IGNORE INTO verification_evidence VALUES(?,?,?,?,?,?,?,?,?,?)',
+                         (answer['job_id'], entry['mobile_id'], manifest['source_revision'], manifest['revision_id'],
+                          manifest['html_sha256'], json.dumps(manifest['rule_report']),
+                          json.dumps({'parent_id': 'parent-' + entry['mobile_id'] + '-' + manifest['revision_id'][:16]}),
+                          None, 'needs_review', api._now()))
+    return answer['job_id']
 
 
 def publish(store, worker_id='macbook-laya-01'):
@@ -182,65 +272,60 @@ def publish(store, worker_id='macbook-laya-01'):
     jobs, skipped = [], []
     for entry in store.db.execute('SELECT * FROM pilot_documents').fetchall():
         manifest = json.loads(entry['manifest'])
+        # Preserve previously complete proofs; do not reissue their model jobs.
+        old_ids = manifest.get('model_job_ids', [])
+        if old_ids and not manifest.get('model_context_exceptions') and all(
+                (e := store.db.execute('SELECT model_report FROM verification_evidence WHERE job_id=?', (i,)).fetchone())
+                and e[0] and json.loads(e[0]).get('status') == 'completed' for i in old_ids):
+            jobs.extend(old_ids)
+            continue
         if not manifest.get('browser'):
             continue
         if mobile.notice_row(store, entry['mobile_id'])['latest_revision'] != manifest['revision_id']:
             continue
         observed = {b['source_refs'][0]: b for b in _observations(manifest, manifest['browser']['viewports'][0])}
-        document_jobs = []
+        document_jobs, coverage = [], []
         for source in manifest['sources']:
             if source.get('role') == 'form':
                 continue
             rendered = observed.get(source['id'])
             if not rendered:
-                skipped.append(source['id']); continue
-            # Whole logical blocks; never truncate a table/header/condition to fit.
-            # Bigger units stay explicit rule-only exceptions until a context-safe splitter exists.
-            if len(source['text']) + len(rendered['visible_text']) > 1800:
                 skipped.append(entry['mobile_id'] + ':' + source['id']); continue
-            src = [{'id': source['id'], 'text': source['text']}]
-            rendered_text = rendered['visible_text']
-            if 'table_rows' in source:
-                rendered_text = '\n'.join(' / '.join(row) for row in rendered.get('table_rows', []))
-                if rendered.get('caption'):
-                    rendered_text = rendered['caption'] + '\n' + rendered_text
-                if rendered.get('note'):
-                    rendered_text += '\n' + rendered['note']
-            render = [{'id': 'r1', 'source_refs': [source['id']], 'visible_text': rendered_text}]
-            source_manifest = {'source_revision': manifest['source_revision'], 'scope': 'section', 'complete': True,
-                               'block_sha256': {source['id']: sha(source['text'].encode())}}
-            artifact = api.put_artifact(store, wc.canonical(source_manifest))
-            qs = ['table_relations'] if 'table_rows' in source else ['conditions', 'omission', 'addition']
-            payload = {'scope': 'section', 'file_role': 'notice', 'source_blocks': src, 'rendered_blocks': render,
-                       'questions': qs, 'required_context_ids': [source['id']],
-                       'coverage_manifest': {'expected_blocks': 1, 'provided_blocks': 1},
-                       'model_policy': {'checkpoint': 'current', 'max_tokens': 1024, 'vision': False},
-                       'deterministic_findings': manifest['rule_report']['viewports'][0]['findings'],
-                       'source_manifest_artifact': artifact, 'notice_id': entry['mobile_id'],
-                       'parent_html_sha256': manifest['html_sha256'], 'parent_source_complete': manifest['parser_coverage_complete'],
-                       'requires_readiness': True, 'require_rubric_hash': True, 'rubric_sha256': rubric_sha256(),
-                       'validation_mode': 'shadow', 'auto_pass_enabled': False, 'auto_publish_enabled': False}
-            digest = wc.input_sha256('verify', payload, manifest['source_revision'], manifest['revision_id'], api.RUBRIC_REVISION)
-            job_id = 'job-pilot-' + digest[:32]
-            env = {'contract_version': wc.CONTRACT_VERSION, 'message_type': 'job', 'job_id': job_id,
-                   'job_kind': 'verify', 'idempotency_key': digest, 'input_sha256': digest,
-                   'lease_id': 'unclaimed', 'fencing_token': 1, 'source_revision': manifest['source_revision'],
-                   'render_revision': manifest['revision_id'], 'rubric_revision': api.RUBRIC_REVISION, 'payload': payload}
-            answer = api.enqueue_job(store, env, target_worker_id=worker_id)
-            if not answer.get('ok'):
-                raise ValueError('pilot enqueue rejected: ' + ';'.join(answer.get('errors', [])))
-            with store.db:
-                store.db.execute('INSERT OR IGNORE INTO verification_evidence VALUES(?,?,?,?,?,?,?,?,?,?)',
-                                 (answer['job_id'], entry['mobile_id'], manifest['source_revision'], manifest['revision_id'],
-                                  manifest['html_sha256'], json.dumps(manifest['rule_report']),
-                                  json.dumps({'parent_id': 'parent-' + entry['mobile_id']}), None, 'needs_review', api._now()))
-            jobs.append(answer['job_id']); document_jobs.append(answer['job_id'])
+            for index, part in enumerate(section_parts(source, rendered)):
+                if len(part['source_text']) + len(part['render_text']) > 1800:
+                    skipped.append(entry['mobile_id'] + ':' + source['id'] + f':p{index}'); continue
+                job_id = _publish_part(store, entry, manifest, source, part, index, worker_id)
+                jobs.append(job_id); document_jobs.append(job_id)
+                coverage.append({'job_id':job_id, **{k:v for k,v in part.items() if k not in ('source_text','render_text')}})
         manifest['model_job_ids'] = document_jobs
+        manifest['model_part_coverage'] = coverage
         manifest['model_context_exceptions'] = [s for s in skipped if s.startswith(entry['mobile_id'] + ':')]
         with store.db:
             store.db.execute('UPDATE pilot_documents SET manifest=? WHERE mobile_id=?',
                              (json.dumps(manifest, ensure_ascii=False), entry['mobile_id']))
     return {'published': len(jobs), 'job_ids': jobs, 'context_exceptions': len(skipped)}
+
+
+def _coverage_complete(manifest):
+    parts = manifest.get('model_part_coverage')
+    if parts is None:  # Previous whole-block protocol; keep its immutable proof.
+        return True
+    if sorted(p['job_id'] for p in parts) != sorted(manifest.get('model_job_ids', [])):
+        return False
+    wanted = {s['id']:s for s in manifest['sources'] if s.get('role') != 'form'}
+    if set(p['parent_source_id'] for p in parts) != set(wanted):
+        return False
+    for sid, source in wanted.items():
+        group = [p for p in parts if p['parent_source_id'] == sid]
+        if 'table_rows' not in source:
+            if len(group) != 1 or group[0]['source_sha256'] != sha(source['text'].encode()):
+                return False
+        else:
+            rows = [r for p in group for r in p['covered_rows']]
+            expected = list(range(1, len(source['table_rows']))) if len(source['table_rows']) > 1 else list(range(len(source['table_rows'])))
+            if sorted(rows) != expected:
+                return False
+    return True
 
 
 def status(store):
@@ -250,7 +335,8 @@ def status(store):
     for entry in store.db.execute('SELECT * FROM pilot_documents'):
         m = json.loads(entry['manifest']); ids = m.get('model_job_ids', [])
         evidence = [store.db.execute('SELECT model_report FROM verification_evidence WHERE job_id=?', (i,)).fetchone() for i in ids]
-        complete = bool(ids) and not m.get('model_context_exceptions') and all(e and e[0] and
+        complete = bool(ids) and _coverage_complete(m) and m['parser_coverage_complete'] and \
+            m.get('rule_report', {}).get('status') == 'passed' and not m.get('model_context_exceptions') and all(e and e[0] and
             json.loads(e[0]).get('status') == 'completed' and not json.loads(e[0]).get('context_missing') and
             not json.loads(e[0]).get('truncated') for e in evidence)
         result['documents'] += 1; result['html_documents'] += 1
@@ -308,11 +394,12 @@ def main():
     p.add_argument('action', choices=['prepare', 'browser', 'publish', 'status'])
     p.add_argument('--ids', nargs='+', default=[])
     p.add_argument('--evidence', type=Path)
+    p.add_argument('--refresh', action='store_true', help='new candidate revision, preserving prior pilot history')
     args = p.parse_args()
     if not (args.data_dir / 'db/moa.sqlite3').is_file():
         p.error('existing MOA DB required')
     with Store(args.data_dir) as store:
-        if args.action == 'prepare': out = prepare(store, args.ids)
+        if args.action == 'prepare': out = prepare(store, args.ids, refresh=args.refresh)
         elif args.action == 'browser': out = ingest_browser(store, json.loads(args.evidence.read_bytes()))
         elif args.action == 'publish': out = publish(store)
         else: out = status(store)
