@@ -85,3 +85,16 @@ def test_eval_and_approved_inputs_not_regenerated(tmp_path):
     with Store(tmp_path) as s:
         mid = mobile.create_upload(s, [('안내.html', b'<html><p>synthetic</p></html>')], evaluation=True)
         with pytest.raises(ValueError, match='evaluation'): pilot.prepare(s, [mid])
+
+
+def test_daily_suggestions_max_two_exceptions_and_one_sample_no_refill(tmp_path):
+    with Store(tmp_path) as s:
+        ids = [document(s) for _ in range(3)]; pilot.prepare(s, ids)
+        for mid in ids: pilot.ingest_browser(s, browser_fixture(s, mid))
+        for mid in ids[:2]: pilot.ingest_browser(s, browser_fixture(s, mid, mutate=True))
+        picked = pilot.review_suggestions(s, '2026-10-18')
+        assert len(picked) == 3
+        assert sum(p['reason'] == 'important_exception' for p in picked) == 2
+        assert sum(p['reason'] == 'whole_document_sample' for p in picked) == 1
+        assert picked == pilot.review_suggestions(s, '2026-10-18')
+        assert s.db.execute('SELECT count(*) FROM mobile_reviews').fetchone()[0] == 0

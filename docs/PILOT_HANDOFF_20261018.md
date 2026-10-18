@@ -48,7 +48,7 @@ job done은 통신 작업 완료이지 문서 추출 성공·전체 품질 통�
 ## 독립 합성 학습 묶음
 
 `moa.training_bundle`은 원본 사실 그룹50개/semantic family10개에서 1,000쌍을 만든다.
-**독립 양식 family50개를 확보했다는 뜻이 아니며 그 목표에는40개 부족하다.**
+**독립 양식 family50개를 확보했다는 뜻은 아니다. 원본 그룹50개와 family10개를 구분한다.**
 train600(원본30/family6), calibration200(10/2), validation200(10/2), family/source hash 그룹 경계를 공유한다.
 기존 평가 전용 자료·파생본, 미확인 보류, JEV 출력·LAYA 자기 판정은 사용하지 않는다.
 인간 정답0개, 합성 oracle 정답1,000개를 분리한다. 정답/변형종류/분할 메타데이터는 추론 state에 넣지 않는다.

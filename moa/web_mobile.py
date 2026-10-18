@@ -44,7 +44,17 @@ class MobileMixin:
             '<label><input name="evaluation" type="checkbox"> 평가용 자료 (다른 안내문의 추천 사례에서 제외)</label>'
             '<button class="ok">업로드하고 파일 역할 확인</button>'
             '<p class="muted">파일당 25MB · 총 50MB · 최대 10개. HWP/HWPX/DOCX/텍스트 PDF/HTML 변환, 이미지·스캔 문서는 미지원 표시.</p>'
-            '</form></section><h2>업로드·변환 기록</h2>')
+            '</form></section>')
+        from .pilot import review_suggestions
+        suggestions = review_suggestions(self.store)
+        if suggestions:
+            content += '<section class="card"><h2>오늘 확인할 자료 · 하루 최대 3건</h2><p class="muted">중요 예외 최대 2건과 전체 점검 표본 1건입니다. 보류는 오답이 아니며 자동 승인하지 않습니다.</p>'
+            for item in suggestions:
+                entry = mobile.notice_row(self.store, item['mobile_id'])
+                label = '중요 예외' if item['reason'] == 'important_exception' else '전체 점검 표본'
+                content += '<p><a href="/notice?id=%s">%s</a> · %s</p>' % (esc(item['mobile_id']), esc(entry['title']), label)
+            content += '</section>'
+        content += '<h2>업로드·변환 기록 (전체 기록 · 매일 모두 검수할 필요 없음)</h2>'
         rows = self.store.db.execute('SELECT * FROM mobile_notices WHERE origin_notice_id IS NULL OR latest_revision IS NOT NULL'
                                     ' ORDER BY updated_at DESC LIMIT 60').fetchall()
         states = {'files_ready':'파일 역할 확인','processing':'변환 중','candidate':'미검수','approved':'승인','held':'보류','rejected':'반려'}

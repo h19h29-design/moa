@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from . import mobile, worker_api as api, worker_contract as wc
-from .core import Store, atomic_write
+from .core import Store, atomic_write, kst_now
 from .extract import PARSER_VERSION
 from .verification import compare
 from .worker_handoff import rubric_sha256
@@ -262,6 +262,44 @@ def status(store):
                                 'model_jobs': len(ids), 'model_results': sum(bool(e and e[0]) for e in evidence),
                                 'end_to_end': complete, 'final_verdict': 'needs_review'})
     return result
+
+
+def review_suggestions(store, day=None):
+    """Stable daily maximum: two unresolved exceptions + one whole-document sample.
+
+    This is a recommendation, not an approval queue that silently labels holds.
+    Completed choices are not replaced with more work on the same day.
+    """
+    api.ensure_worker_tables(store)
+    day = day or kst_now().date().isoformat()
+    store.db.execute('CREATE TABLE IF NOT EXISTS pilot_daily_reviews('
+                     'day TEXT NOT NULL,mobile_id TEXT NOT NULL,revision_id TEXT NOT NULL,'
+                     'reason TEXT NOT NULL,PRIMARY KEY(day,mobile_id))')
+    existing = store.db.execute('SELECT * FROM pilot_daily_reviews WHERE day=?', (day,)).fetchall()
+    if not existing:
+        candidates = []
+        for row in store.db.execute('SELECT p.*,n.state,n.split,n.title,n.latest_revision FROM pilot_documents p'
+                                     ' JOIN mobile_notices n ON n.id=p.mobile_id'):
+            if row['split'] == 'eval' or row['state'] in ('approved', 'rejected') or row['revision_id'] != row['latest_revision']:
+                continue
+            m = json.loads(row['manifest'])
+            exception = m.get('rule_report', {}).get('status') != 'passed' or bool(m.get('model_context_exceptions'))
+            for jid in m.get('model_job_ids', []):
+                evidence = store.db.execute('SELECT model_report FROM verification_evidence WHERE job_id=?', (jid,)).fetchone()
+                if evidence and evidence[0] and json.loads(evidence[0]).get('status') != 'completed':
+                    exception = True
+            candidates.append({'mobile_id': row['mobile_id'], 'revision_id': row['revision_id'], 'exception': exception})
+        rank = lambda item: sha((day + ':' + item['mobile_id']).encode())
+        exceptions = sorted((c for c in candidates if c['exception']), key=rank)[:2]
+        selected = [dict(c, reason='important_exception') for c in exceptions]
+        pool = [c for c in candidates if c['mobile_id'] not in {e['mobile_id'] for e in exceptions}]
+        if pool: selected.append(dict(min(pool, key=rank), reason='whole_document_sample'))
+        with store.db:
+            for item in selected:
+                store.db.execute('INSERT OR IGNORE INTO pilot_daily_reviews VALUES(?,?,?,?)',
+                                 (day, item['mobile_id'], item['revision_id'], item['reason']))
+        existing = store.db.execute('SELECT * FROM pilot_daily_reviews WHERE day=?', (day,)).fetchall()
+    return [dict(row) for row in existing]
 
 
 def main():
