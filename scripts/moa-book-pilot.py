@@ -31,6 +31,311 @@ def digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
+MODEL_INPUT_REVISION = 'moa.laya.runtime-input.v1'
+
+
+def prepare_training_rows(rows, question_definitions):
+    """Match policy.state_for/questions insertion order, without changing facts/gold.
+
+    Canonical JSON hashes intentionally ignore key order; LAYA's serialize_state
+    does not. Never rewrite immutable bundle files or silently coerce a rubric.
+    Nested maps follow the canonical wire representation used by NAS jobs.
+    """
+    prepared = json.loads(canonical(rows))
+    fields = ('title', 'file_role', 'source_complete', 'source_blocks',
+              'rendered_blocks', 'attachment_manifest')
+    for row in prepared:
+        if set(row['state']) != set(fields): raise ValueError('training_state_fields')
+        row['state'] = {key: row['state'][key] for key in fields}
+        for key, question in row['questions'].items():
+            if key not in question_definitions or question != question_definitions[key]:
+                raise ValueError('training_rubric_mismatch')
+        row['questions'] = json.loads(json.dumps({key: question_definitions[key] for key in row['questions']}))
+    return prepared
+
+
+def quality_metrics(records, *, breakdown=True):
+    """Raw model accuracy is not the rules' verdict or a release gate."""
+    from collections import Counter
+    labels = ('preserved', 'changed', 'insufficient')
+    if any(r['expected'] not in labels or r['prediction'] not in labels for r in records):
+        raise ValueError('quality_label')
+    n = len(records)
+    cm = {a: {b: 0 for b in labels} for a in labels}
+    for r in records: cm[r['expected']][r['prediction']] += 1
+    gold = Counter(r['expected'] for r in records)
+    recall = {a: cm[a][a]/gold[a] if gold[a] else None for a in labels}
+    f1 = []
+    for a in labels:
+        denom = gold[a] + sum(cm[b][a] for b in labels)
+        f1.append(2*cm[a][a]/denom if denom else 0)
+    observed = [v for v in recall.values() if v is not None]
+    out = {'items': n, 'accuracy': sum(cm[a][a] for a in labels)/n if n else None,
+           'majority_baseline': max(gold.values())/n if n else None,
+           'gold_counts': dict(gold), 'prediction_counts': dict(Counter(r['prediction'] for r in records)),
+           'confusion': cm, 'recall': recall, 'balanced_accuracy': sum(observed)/len(observed) if observed else None,
+           'macro_f1': sum(f1)/len(f1) if n else None, 'changed_recall': recall['changed'],
+           'changed_missed_as_preserved': cm['changed']['preserved'],
+           'unsafe_false_preserved': cm['changed']['preserved'] + cm['insufficient']['preserved'],
+           'auto_promotion_allowed': False}
+    if breakdown:
+        for field in ('criterion', 'mutation'):
+            out['by_'+field] = {key: quality_metrics([r for r in records if r.get(field)==key], breakdown=False)
+                               for key in sorted({r[field] for r in records if field in r})}
+    return out
+
+
+QUALITY_CONFIG = {'epochs':1, 'micro_batch':1, 'grad_accum':5,
+                  'head_lr':0.0003, 'min_lr':0.000001, 'shuffle_options':['choice'],
+                  'freeze_encoder':True, 'amp':False, 'gradient_checkpointing':False,
+                  'max_len':1024, 'head_max_len':256, 'loss':'soft-ce',
+                  'calib_frac':0, 'calib_max':0, 'log_every':50, 'seed':20261018}
+
+
+def reserve_quality_run(root, rows, manifest_sha, permit, now, *, recovery=False):
+    """One user-authorized additional run, not a permanent weekly-limit change."""
+    approval = 'explicit_user_one_local_resource_recovery' if recovery else 'explicit_user_one_additional_local_run'
+    if (permit.get('approval')!=approval or
+            permit.get('additional_runs')!=1 or permit.get('manifest_sha256')!=manifest_sha or
+            permit.get('maximum_active_seconds')!=2700 or permit.get('maximum_optimizer_updates')!=120 or
+            permit.get('encoder_frozen') is not True or permit.get('paid_models_allowed') is not False or
+            permit.get('operational_promotion_allowed') is not False):
+        raise ValueError('quality_approval')
+    suffix = '-accuracy-recovery-01' if recovery else '-accuracy-01'
+    folder = root/'runs'/('train-pilot-'+manifest_sha[:20]+suffix)
+    if folder.exists(): raise ValueError('quality_attempt_already_reserved')
+    if recovery:
+        failed = root/'runs'/('train-pilot-'+manifest_sha[:20]+'-accuracy-01')
+        candidate = root/'candidates'/failed.name
+        prior_parent = json.loads((failed/'PARENT_RESULT.json').read_bytes())
+        prior_progress = json.loads((candidate/'progress.json').read_bytes())
+        tail = (failed/'training.log').read_bytes()[-4096:]
+        if (prior_parent.get('status')!='interrupted' or prior_parent.get('exit_code')!=1 or
+                prior_progress.get('optimizer_updates')!=120 or
+                b'resource_or_pause_gate' not in tail or (candidate/'checkpoint/model.safetensors').exists()):
+            raise ValueError('quality_recovery_not_eligible')
+    ledger = {identity:r['meta']['split'] for r in rows for identity in
+              (r['meta']['original_group_id'],r['meta']['family_group_id'],r['meta']['source_sha256'])}
+    dataset_sha = digest(canonical(rows)); prior_complete = False; weekly = 0
+    for path in (root/'runs').glob('*/reservation.json'):
+        import datetime
+        prior = json.loads(path.read_bytes())
+        if datetime.datetime.fromisoformat(prior['reserved_at']).isocalendar()[:2]==now.isocalendar()[:2]: weekly += 1
+        for key, split in ledger.items():
+            if key in prior.get('split_ledger',{}) and prior['split_ledger'][key]!=split:
+                raise ValueError('historical_eval_group_leakage')
+        outcome = path.parent/'training-result.json'
+        if prior.get('dataset_sha256')==dataset_sha and prior.get('manifest_sha256')==manifest_sha and outcome.is_file():
+            prior_complete |= json.loads(outcome.read_bytes()).get('status')=='completed'
+    if weekly >= (4 if recovery else 3): raise ValueError('weekly_run_limit')
+    if not prior_complete: raise ValueError('quality_requires_completed_baseline_run')
+    folder.mkdir(parents=True, mode=0o700, exist_ok=False)
+    # Exclusive creation is the durable one-time consumption of the approval.
+    reservation = {'manifest_sha256':manifest_sha,'dataset_sha256':dataset_sha,'split_ledger':ledger,
+                   'reserved_at':now.isoformat(),'max_wall_seconds':2700,'max_epochs':1,'max_updates':120,
+                   'encoder_frozen':True,'training_config':QUALITY_CONFIG,
+                   'model_input_revision':MODEL_INPUT_REVISION,'approval':permit,
+                   'weekly_limit_exception':approval,'champion_changed':False}
+    (folder/'reservation.json').write_bytes(canonical(reservation))
+    (folder/'reservation.json').chmod(0o600)
+    return folder
+
+
+def evaluate_quality_model(model, tok, rows):
+    import torch
+    from workers.laya_local import ml
+    from laya.train import items_from_rows, calibration_records
+    maximum_tokens = 0
+    for row in rows:
+        measured = ml.preflight(tok, row['state'], row['questions'])
+        maximum_tokens = max(maximum_tokens,max(v['actual_tokens'] for v in measured.values()))
+    items, skipped = items_from_rows(tok, rows, 1024, 256)
+    if skipped or len(items)!=len(rows): raise ValueError('audit_skipped_rows')
+    rec = calibration_records(model,tok,items,torch.device('mps'),1024,256,batch_size=1)
+    predictions = []
+    for row, record in zip(rows, rec):
+        qid, q = next(iter(row['questions'].items()))
+        labels = list(q['criteria'])
+        target = labels[int(torch.tensor(record[2]).argmax())]
+        if target!=row['expected'][qid]: raise ValueError('audit_target_mapping')
+        probs = torch.tensor(record[1],dtype=torch.float64).softmax(0).tolist()
+        predictions.append({'criterion':qid,'mutation':row['meta']['mutation']['operation'],
+            'source_group':row['meta']['original_group_id'],'family':row['meta']['family_group_id'],
+            'expected':target,'prediction':labels[max(range(len(probs)),key=probs.__getitem__)],
+            'probabilities':dict(zip(labels,probs))})
+    return {'metrics':quality_metrics(predictions),'predictions':predictions,'maximum_tokens':maximum_tokens}
+
+
+def persist_quality_checkpoint(output, evidence, writer):
+    """Commit trained weights before any potentially resource-gated evaluation."""
+    path = output/'checkpoint'
+    hashes = writer(path)
+    model_file = path/'model.safetensors'
+    if not model_file.is_file() or model_file.is_symlink(): raise ValueError('checkpoint_file_missing')
+    with model_file.open('rb') as stream:
+        actual = hashlib.file_digest(stream,'sha256').hexdigest()
+        os.fsync(stream.fileno())
+    if hashes.get('model.safetensors')!=actual: raise ValueError('checkpoint_digest_mismatch')
+    result = {**evidence,'status':'checkpoint_saved_pending_evaluation','checkpoint':str(path),'sha256':hashes}
+    private_json(output/'TRAIN_RESULT.json',result)
+    private_json(output/'progress.json',{'status':result['status'],'optimizer_updates':result['optimizer_updates'],
+                                         'maximum_updates':120})
+    return result
+
+
+def quality_train_child(folder):
+    """Single predeclared experiment. No tuning, early selection or promotion."""
+    import math
+    import torch
+    from workers.laya_local import ml, policy, runtime
+    from laya.train import TrainConfig, items_from_rows, train_model, load_checkpoint, save_checkpoint, optimizer_updates
+    signal.alarm(2700)
+    started = time.monotonic()
+    rows, manifest, mhash = bundle_rows()
+    request = json.loads((folder/'reservation.json').read_bytes())
+    if (request['manifest_sha256']!=mhash or request['training_config']!=QUALITY_CONFIG or
+            request['dataset_sha256']!=policy.digest(rows)):
+        raise ValueError('quality_reservation_mismatch')
+    prepared = prepare_training_rows(rows,policy.questions(list(policy.CRITERIA)))
+    policy.validate_dataset(prepared,manifest,minimum=True)
+    splits = {s:[r for r in prepared if r['meta']['split']==s] for s in ('train','calibration','validation')}
+    output = ROOT/'candidates'/folder.name
+    output.mkdir(mode=0o700,parents=True,exist_ok=False)
+    private_json(output/'DATA_MANIFEST.json',manifest)
+    base = ml.manifest(); ml.verify_model(base['path'],base['sha256'])
+    model,tok,cfg = load_checkpoint(base['path'])
+    model.encoder.config.reference_compile = False
+    model.to('mps'); model.encoder.requires_grad_(False)
+    stop = threading.Event()
+    for sig in (signal.SIGTERM,signal.SIGINT): signal.signal(sig,lambda *_:stop.set())
+    def resource_gate(_model,_args):
+        resources = runtime.resources()
+        if stop.is_set() or training_stop_reason(resources,time.monotonic()-started):
+            private_json(folder/'RESOURCE_STOP.json',{'phase':'model_forward','resources':resources,
+                                                       'elapsed':time.monotonic()-started})
+            raise InterruptedError('resource_or_pause_gate')
+        torch.mps.synchronize(); torch.mps.empty_cache()
+    model.encoder.register_forward_pre_hook(resource_gate)
+    for row in prepared: ml.preflight(tok,row['state'],row['questions'])
+    items,skipped = items_from_rows(tok,splits['train'],1024,256)
+    if skipped or len(items)!=600: raise ValueError('quality_training_inventory')
+    config = TrainConfig(**QUALITY_CONFIG)
+    budget = optimizer_updates(len(items),config.micro_batch,config.grad_accum,config.epochs)
+    if budget!=120 or budget>request['max_updates']: raise ValueError('quality_update_budget')
+    # Both formats and all knobs are frozen in reservation BEFORE these results.
+    before_dev = evaluate_quality_model(model,tok,splits['calibration'])
+    before_test = evaluate_quality_model(model,tok,splits['validation'])
+    private_json(folder/'BASELINE_EVALUATION.json',{'development':before_dev,'held_out':before_test})
+    before = ml.parameter_hash(model); encoder_before = ml.parameter_hash(model,encoder=True)
+    steps = 0; real_step = torch.optim.AdamW.step
+    def step(optimizer,*args,**kwargs):
+        nonlocal steps
+        resources = runtime.resources()
+        if steps>=budget or stop.is_set() or training_stop_reason(resources,time.monotonic()-started):
+            private_json(folder/'RESOURCE_STOP.json',{'phase':'optimizer_boundary','resources':resources,
+                                                       'optimizer_updates':steps,'elapsed':time.monotonic()-started})
+            raise InterruptedError('quality_training_stop')
+        result = real_step(optimizer,*args,**kwargs)
+        torch.mps.synchronize(); steps += 1
+        private_json(output/'progress.json',{'status':'training','optimizer_updates':steps,'maximum_updates':budget})
+        return result
+    torch.optim.AdamW.step = step
+    try:
+        history = train_model(model,tok,items,config,torch.device('mps'),1024,256)
+    finally:
+        torch.optim.AdamW.step = real_step
+    after = ml.parameter_hash(model)
+    if steps!=budget or before==after or encoder_before!=ml.parameter_hash(model,encoder=True) or any(not math.isfinite(v) for v in history):
+        raise ValueError('quality_optimizer_evidence')
+    exported = ml.parameter_hash(model,export_roundtrip=True)
+    evidence = {'optimizer_updates':steps,'training_config':QUALITY_CONFIG,
+              'manifest_sha256':mhash,'dataset_sha256':policy.digest(rows),'model_input_revision':MODEL_INPUT_REVISION,
+              'counts':{s:len(r) for s,r in splits.items()},'loss_history':history,
+              'head_parameter_sha256_before':before,'head_parameter_sha256_after':after,
+              'exported_head_parameter_sha256':exported,'reload_verified':False,
+              'encoder_unchanged':True,'base_checkpoint_sha256':base['sha256']['model.safetensors'],
+              'development_before':before_dev,'held_out_before':before_test,
+              'held_out_is_small_synthetic_development_test':True,'calibration_status':'unfitted',
+              'promotion':'blocked_insufficient_independent_gold','champion_changed':False,
+              'seconds':time.monotonic()-started,'paid_model_calls':0}
+    def save(path):
+        save_checkpoint(model,tok,dict(cfg,max_len=1024,head_max_len=256,temperature=[1,1,1],temperature_by_options={}),str(path))
+        return ml.checkpoint_hashes(path)
+    result = persist_quality_checkpoint(output,evidence,save)
+    private_json(folder/'training-result.json',result)
+    signal.alarm(0)
+
+
+def evaluate_quality_candidate(folder):
+    """Separate verification process; retries never consume another optimizer run."""
+    from workers.laya_local import ml,policy,runtime
+    import torch
+    path = ROOT/'candidates'/folder.name
+    result = json.loads((path/'TRAIN_RESULT.json').read_bytes())
+    if result['status']=='completed': return {'status':'completed','duplicate':True,'run_id':folder.name}
+    if result['status']!='checkpoint_saved_pending_evaluation': raise ValueError('quality_checkpoint_not_ready')
+    if not runtime.resources()['verify_allowed']: raise ValueError('verify_resources_not_ready')
+    rows,manifest,mhash = bundle_rows()
+    if result['manifest_sha256']!=mhash or result['training_config']!=QUALITY_CONFIG:
+        raise ValueError('quality_checkpoint_metadata')
+    prepared = prepare_training_rows(rows,policy.questions(list(policy.CRITERIA)))
+    signal.alarm(900)
+    try:
+        with runtime.exclusive(ROOT/'device.lock'):
+            agent = ml.load_agent(Path(result['checkpoint']),result['sha256'])
+            def resource_gate(_model,_args):
+                if not runtime.resources()['verify_allowed']: raise InterruptedError('evaluation_resource_gate')
+                torch.mps.synchronize(); torch.mps.empty_cache()
+            agent.model.encoder.register_forward_pre_hook(resource_gate)
+            reloaded = ml.parameter_hash(agent.model)
+            if reloaded!=result['exported_head_parameter_sha256']: raise ValueError('quality_reload_parameter_mismatch')
+            reports = {split:evaluate_quality_model(agent.model,agent.tok,[r for r in prepared if r['meta']['split']==split])
+                       for split in ('calibration','validation','train')}
+            from workers.laya_local.fixtures import evaluation_cases
+            reload_inference = ml.predict_payload(agent,evaluation_cases()[0]['payload'],result['sha256']['model.safetensors'])
+            result.update(status='completed',reload_verified=True,reload_parameter_sha256=reloaded,
+                          development_after=reports['calibration'],held_out_after=reports['validation'],
+                          train_diagnostic=reports['train'],reload_inference=reload_inference,
+                          metrics_stage='actual_reloaded_fp16_checkpoint',champion_changed=False)
+            private_json(path/'TRAIN_RESULT.json',result)
+            private_json(folder/'training-result.json',result)
+            private_json(path/'progress.json',{'status':'completed','optimizer_updates':120,'maximum_updates':120})
+            return {'status':'completed','run_id':folder.name,'checkpoint_sha256':result['sha256']['model.safetensors'],
+                    'metrics':{k:{field:v for field,v in data['metrics'].items() if not field.startswith('by_')}
+                               for k,data in reports.items()},'champion_changed':False}
+    finally:
+        signal.alarm(0)
+
+
+def improve_quality(*, recovery=False):
+    from workers.laya_local import runtime
+    import datetime
+    rows,manifest,mhash = bundle_rows()
+    permit_path = ROOT/'incoming'/('QUALITY_RECOVERY_APPROVAL_20261018.json' if recovery else 'QUALITY_RUN_APPROVAL_20261018.json')
+    stat = permit_path.lstat()
+    if permit_path.is_symlink() or stat.st_uid!=os.getuid() or stat.st_mode & 0o077:
+        raise ValueError('quality_approval_permissions')
+    permit = json.loads(permit_path.read_bytes())
+    if training_stop_reason(runtime.resources(),0): raise ValueError('training_resources_not_ready')
+    with runtime.exclusive(ROOT/'device.lock'):
+        folder = reserve_quality_run(ROOT,rows,mhash,permit,datetime.datetime.now(datetime.timezone.utc),recovery=recovery)
+        with (folder/'training.log').open('ab') as log:
+            (folder/'training.log').chmod(0o600)
+            started = time.monotonic()
+            child = subprocess.Popen([sys.executable,__file__,'quality-child','--run-folder',str(folder)],
+                                     stdout=log,stderr=log,cwd=ROOT/'app')
+            reason = supervise_training(child,runtime.resources)
+        saved = ROOT/'candidates'/folder.name/'TRAIN_RESULT.json'
+        saved_status = json.loads(saved.read_bytes())['status'] if saved.exists() else None
+        stop_path = folder/'RESOURCE_STOP.json'
+        stop_record = json.loads(stop_path.read_bytes()) if stop_path.exists() else None
+        outcome = {'run_id':folder.name,'status':saved_status if saved_status else 'interrupted',
+                   'reason':reason,'exit_code':child.returncode,'seconds':time.monotonic()-started,
+                   'resource_stop':stop_record,'champion_changed':False,'approval_consumed':True}
+        private_json(folder/'PARENT_RESULT.json',outcome)
+        return outcome
+
+
 def claimed_job(response):
     if response is None: return None
     if not isinstance(response, dict) or response.get('ok') is not True or not isinstance(response.get('job'), dict):
@@ -243,7 +548,11 @@ def train_child(folder):
         model.encoder.register_forward_pre_hook(clear_unused)
         return model, tok, cfg
     engine.load_checkpoint = low_cache_load
-    result = ml.train(rows, manifest, ROOT / 'candidates' / folder.name)
+    from workers.laya_local import policy
+    prepared = prepare_training_rows(rows, policy.questions(list(policy.CRITERIA)))
+    result = ml.train(prepared, manifest, ROOT / 'candidates' / folder.name)
+    result['model_input_revision'] = MODEL_INPUT_REVISION
+    result['raw_bundle_dataset_sha256'] = policy.digest(rows)
     private_json(folder / 'training-result.json', result)
     signal.alarm(0)
 
@@ -321,6 +630,73 @@ def train_bundle(*, retry_resource=False):
         if reason: outcome['stop_resources'] = last_resources
         private_json(folder / 'PARENT_RESULT.json', outcome)
         return outcome
+
+
+def audit_quality(*, split='calibration', formats=('artifact', 'runtime')):
+    """Read-only, resource-gated local audit; never retune against held-out test.
+
+    Keeps per-criterion/mutation raw predictions. Does not use the model's own
+    output as gold, fit temperatures, modify checkpoints, or reserve a train run.
+    """
+    if split not in ('train', 'calibration'): raise ValueError('audit_split_forbidden')
+    if not formats or any(v not in ('artifact', 'runtime') for v in formats):
+        raise ValueError('audit_input_format')
+    import gc
+    import torch
+    from workers.laya_local import ml, policy, runtime
+    from laya.train import load_checkpoint, items_from_rows, calibration_records
+    rows, manifest, mhash = bundle_rows()
+    rows = [r for r in rows if r['meta']['split']==split]
+    prior = ROOT / 'candidates/train-pilot-ef81fadafc79bb2cfdee-resource-retry1/TRAIN_RESULT.json'
+    trained = json.loads(prior.read_bytes())
+    base = ml.manifest()
+    checkpoints = {'base': (Path(base['path']), base['sha256']),
+                   'candidate': (Path(trained['checkpoint']), trained['sha256'])}
+    report = {'purpose':'development_diagnostic_not_release_evaluation', 'split':split,
+              'validation_used':False, 'training_performed':False, 'manifest_sha256':mhash,
+              'model_input_revision':MODEL_INPUT_REVISION, 'models':{},
+              'champion_changed':False, 'auto_promotion_allowed':False}
+    signal.alarm(900)
+    try:
+        with runtime.exclusive(ROOT/'device.lock'):
+            for name, (path, hashes) in checkpoints.items():
+                if not runtime.resources()['verify_allowed']: raise ValueError('audit_resources')
+                ml.verify_model(path, hashes)
+                model, tok, cfg = load_checkpoint(str(path))
+                model.encoder.config.reference_compile = False
+                model.to('mps').eval()
+                def resource_gate(_model, _args):
+                    if not runtime.resources()['verify_allowed']: raise ValueError('audit_resources')
+                    torch.mps.synchronize(); torch.mps.empty_cache()
+                model.encoder.register_forward_pre_hook(resource_gate)
+                output = {}
+                for form in formats:
+                    selected = (rows if form=='artifact' else
+                                prepare_training_rows(rows, policy.questions(list(policy.CRITERIA))))
+                    for row in selected: ml.preflight(tok, row['state'], row['questions'])
+                    items, skipped = items_from_rows(tok, selected, 1024, 256)
+                    if skipped or len(items)!=len(selected): raise ValueError('audit_skipped_rows')
+                    rec = calibration_records(model, tok, items, torch.device('mps'),1024,256,batch_size=8)
+                    predictions = []
+                    for row, record in zip(selected, rec):
+                        qid, q = next(iter(row['questions'].items()))
+                        labels = list(q['criteria'])
+                        target = labels[int(torch.tensor(record[2]).argmax())]
+                        if target!=row['expected'][qid]: raise ValueError('audit_target_mapping')
+                        probs = torch.tensor(record[1],dtype=torch.float64).softmax(0).tolist()
+                        predictions.append({'criterion':qid, 'mutation':row['meta']['mutation']['operation'],
+                            'source_group':row['meta']['original_group_id'],'family':row['meta']['family_group_id'],
+                            'expected':target,'prediction':labels[max(range(len(probs)),key=probs.__getitem__)],
+                            'probabilities':dict(zip(labels,probs))})
+                    output[form] = {'metrics':quality_metrics(predictions), 'predictions':predictions}
+                report['models'][name] = {'checkpoint_sha256':hashes['model.safetensors'], 'formats':output}
+                del model; gc.collect(); torch.mps.empty_cache()
+        name = 'quality-audit-'+split+'-'+str(time.time_ns())+'.json'
+        private_json(ROOT/'runs'/name,report)
+        return {'report':name, 'split':split, 'models':{model:{form:r['metrics'] for form,r in
+                    data['formats'].items()} for model,data in report['models'].items()}}
+    finally:
+        signal.alarm(0)
 
 
 def device_available():
@@ -422,7 +798,10 @@ def result_payload(local, job, validator_hash):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=['ready', 'run', 'receipt', 'daemon', 'train', 'train-child'])
+    parser.add_argument('action', choices=['ready', 'run', 'receipt', 'daemon', 'train', 'train-child', 'audit', 'improve', 'quality-child', 'quality-evaluate'])
+    parser.add_argument('--recovery',action='store_true',help='separately approved resource-recovery attempt, never automatic')
+    parser.add_argument('--audit-split', choices=['train','calibration'], default='calibration')
+    parser.add_argument('--audit-format', choices=['artifact','runtime','both'], default='both')
     parser.add_argument('--run-folder', type=Path)
     parser.add_argument('--retry-resource', action='store_true', help='at most one early resource-abort restart; no quality tuning')
     parser.add_argument('--max-jobs', type=int, default=100)
@@ -432,12 +811,19 @@ def main():
         raise ValueError('bounded_run_limits')
     os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', HF_HUB_DISABLE_TELEMETRY='1', WANDB_DISABLED='true')
     if args.action == 'daemon': standing_worker(); return
+    if args.action == 'audit':
+        formats = ('artifact','runtime') if args.audit_format=='both' else (args.audit_format,)
+        print(json.dumps(audit_quality(split=args.audit_split,formats=formats))); return
     if args.action == 'train': print(json.dumps(train_bundle(retry_resource=args.retry_resource))); return
-    if args.action == 'train-child':
+    if args.action == 'improve': print(json.dumps(improve_quality(recovery=args.recovery))); return
+    if args.action in ('train-child','quality-child','quality-evaluate'):
         folder = args.run_folder.resolve()
         if folder.parent != (ROOT / 'runs').resolve() or not folder.name.startswith('train-pilot-'):
             raise ValueError('training_run_path')
-        train_child(folder); return
+        if args.action=='quality-evaluate': print(json.dumps(evaluate_quality_candidate(folder)))
+        elif args.action=='quality-child': quality_train_child(folder)
+        else: train_child(folder)
+        return
     client = Client()
     if args.action == 'receipt':
         path = ROOT / 'incoming/moa-ko-synthetic-20261018-v1/SSH_RECEIPT.json'
