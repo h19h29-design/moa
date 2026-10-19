@@ -137,6 +137,66 @@ def department_links(rows):
     return {'recognized': False, 'valid': False, 'pairs': [], 'identity_pairs': [], 'preamble': ''}
 
 
+def compare_fact_bundle(state):
+    """Compare scoped native facts with actual DOM facts, not training answers.
+
+    This is a research input adapter, not a proof that a parser covered a whole
+    original. Rows may move only when a unique explicit first-column key keeps
+    every cell association. Units, headers, notes, conditions and multiplicity
+    remain evidence. No oracle metadata or model output is read here.
+    """
+    result = {'quality_label':'insufficient', 'findings':[], 'mode':'shadow_only',
+              'human_approved':False, 'whole_original_verified':False}
+    if state.get('source_complete') is not True:
+        return {**result,'findings':['incomplete_context']}
+    try:
+        sources, rendered = state['source_blocks'], state['rendered_blocks']
+        if len(sources)!=1 or len(rendered)!=1 or rendered[0]['source_refs']!=[sources[0]['id']]:
+            raise ValueError('ambiguous binding')
+        left, right = json.loads(sources[0]['text']), json.loads(rendered[0]['visible_text'])
+        allowed = {'headers','rows','geometry','caption','unit','notes','conditions','facts'}
+        for facts in (left,right):
+            if not isinstance(facts,dict) or set(facts)-allowed: raise ValueError('unknown facts')
+            for key in ('caption','unit'):
+                if key in facts and not isinstance(facts[key],str): raise ValueError('text fact')
+            for key in ('headers','notes','conditions','facts'):
+                if key in facts and (not isinstance(facts[key],list) or not all(isinstance(v,str) for v in facts[key])):
+                    raise ValueError('list fact')
+            if 'rows' in facts:
+                headers=facts.get('headers')
+                if not headers or not isinstance(facts['rows'],list): raise ValueError('table context')
+                if any(not isinstance(row,list) or len(row)!=len(headers) or
+                       not all(isinstance(v,str) for v in row) for row in facts['rows']):
+                    raise ValueError('table shape')
+            substantive=[v for key in ('facts','conditions','notes') for v in facts.get(key,[]) if v.strip()]
+            substantive += [cell for row in facts.get('rows',[]) for cell in row if cell.strip()]
+            if not substantive: raise ValueError('empty fact extraction')
+            geometry=facts.get('geometry',[])
+            if not isinstance(geometry,list) or any(not isinstance(g,list) or len(g)!=4 or
+                    any(type(n)!=int for n in g) or min(g[:2])<0 or min(g[2:])<1 for g in geometry):
+                raise ValueError('merge geometry')
+        findings=[]
+        for key in ('caption','unit','headers','notes','conditions','facts'):
+            a,b=left.get(key,'' if key in ('caption','unit') else []),right.get(key,'' if key in ('caption','unit') else [])
+            normal=lambda x: content_tokens(x) if isinstance(x,str) else [content_tokens(v) for v in x]
+            if normal(a)!=normal(b): findings.append(key+'_mismatch')
+        a,b=left.get('rows',[]),right.get('rows',[])
+        keys=lambda rows:[content_tokens(row[0]) for row in rows]
+        unique_keyed=bool(a) and len(set(keys(a)))==len(a) and len(set(keys(b)))==len(b)
+        normalized=lambda rows:[tuple(content_tokens(v) for v in row) for row in rows]
+        equal=(Counter(normalized(a))==Counter(normalized(b))) if unique_keyed else normalized(a)==normalized(b)
+        if not equal: findings.append('row_relation_mismatch')
+        # A flat card has no physical table coordinates. Single unmerged cells
+        # carry no extra association beyond the already checked header/keyed row.
+        # Nontrivial merges still need explicit matching evidence.
+        merges=lambda facts:[g for g in facts.get('geometry',[]) if g[2:]!=[1,1]]
+        if merges(left)!=merges(right): findings.append('merge_relation_mismatch')
+        return {**result,'quality_label':'changed' if findings else 'preserved','findings':findings,
+                'source_facts_sha256':_hash(left),'dom_facts_sha256':_hash(right)}
+    except (ValueError,KeyError,TypeError,IndexError):
+        return {**result,'findings':['unsupported_fact_context']}
+
+
 def combine_verdict(rule_report, model_reports, *, browser_ok):
     """Trial quality verdict, never an approval or promotion of an R1 checkpoint."""
     labels, completed = [], bool(model_reports)
