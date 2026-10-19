@@ -43,6 +43,12 @@ def library():
 r = library()
 
 
+def release_unused_device_cache(torch):
+    # Own-process allocations only. Do not change the MPS watermark, the live
+    # FP32 parameters/gradients, or the existing shared runtime resource guard.
+    gc.collect(); torch.mps.synchronize(); torch.mps.empty_cache()
+
+
 def confined(root, name):
     p = root/name
     if Path(name).is_absolute() or '..' in Path(name).parts or p.is_symlink() or not p.resolve().is_relative_to(root.resolve()):
@@ -132,6 +138,7 @@ def train(path, phase, resume=False):
         model.encoder.config.reference_compile = False
         model.to('mps'); model.encoder.requires_grad_(False)
         if not torch.backends.mps.is_available(): raise RuntimeError('MPS required')
+        release_unused_device_cache(torch)
         named = {n:p for n,p in model.named_parameters() if p.requires_grad}
         trainable = sum(p.numel() for p in named.values())
         if any(n.startswith('encoder.') for n in named) or trainable != 14969347:
@@ -147,7 +154,7 @@ def train(path, phase, resume=False):
         torch.manual_seed(config.seed); order_rng = random.Random(config.seed)
         cursor = {'epoch':0,'next_microbatch':0}
         data_sha = r.digest(rows)
-        before, encoder_before = ml.parameter_hash(model), ml.parameter_hash(model,encoder=True)
+        before, encoder_before = r.parameter_hash_cpu_first(model), r.parameter_hash_cpu_first(model,encoder=True)
         if resume:
             source = confined(folder,previous['checkpoint'])
             r.verify_snapshot(source,previous.get('checkpoint_files'))
@@ -158,6 +165,8 @@ def train(path, phase, resume=False):
             torch.set_rng_state(state['torch_rng']); torch.mps.set_rng_state(state['mps_rng'])
             random.setstate(state['python_rng']); order_rng.setstate(state['option_rng'])
             cursor = state['cursor']; before = state['initial_head_sha256']
+            del state
+        release_unused_device_cache(torch)
         r.atomic_json(folder/'DATA_MANIFEST.json',{'scope':'synthetic_research','eligibility':eligibility,
             'phase':phase,'rows':len(rows),'case_ids':[x['case_id'] for x in rows],
             'data_sha256':data_sha,'configuration':cfg,'parent_sha256':handoff['expected_model_sha256'],
@@ -176,7 +185,7 @@ def train(path, phase, resume=False):
             name = tag+'-%04d-%02d'%(steps,fencing)
             def writer(output):
                 # Save first. No calibration or validation is called inside training.
-                tr.save_checkpoint(model,tok,dict(model_cfg,max_len=1024,head_max_len=256,
+                r.save_checkpoint_cpu_first(model,tok,dict(model_cfg,max_len=1024,head_max_len=256,
                     temperature=[1,1,1],temperature_by_options={}),str(output))
                 state = {'head':{n:v.detach().cpu().clone() for n,v in model.state_dict().items() if not n.startswith('encoder.')},
                     'optimizer':optimizer.state_dict(),'scheduler':scheduler.state_dict(),'step':steps,
@@ -185,14 +194,15 @@ def train(path, phase, resume=False):
                     'data_sha256':data_sha,'run_id':job['run_id'],'phase':phase,'initial_head_sha256':before}
                 torch.save(state,output/'training-state.pt')
                 r.atomic_json(output/'RESEARCH_METADATA.json',{'run_id':job['run_id'],'phase':phase,
-                    'optimizer_updates':steps,'head_fp32_sha256':ml.parameter_hash(model),
-                    'exported_head_sha256':ml.parameter_hash(model,export_roundtrip=True),
+                    'optimizer_updates':steps,'head_fp32_sha256':r.parameter_hash_cpu_first(model),
+                    'exported_head_sha256':r.parameter_hash_cpu_first(model,export_roundtrip=True),
                     'data_sha256':data_sha,'configuration':cfg,'cursor':cursor,
                     'independent_evaluation_started':False,'operational_promotion':False})
                 return ml.checkpoint_hashes(output)
             hashes = r.commit_snapshot(folder/name,writer)
             snapshots.append({'name':name,'updates':steps,'sha256':hashes['model.safetensors']})
             r.atomic_json(folder/'SNAPSHOTS.json',snapshots)
+            release_unused_device_cache(torch)
             return name,hashes
 
         def gate():
@@ -214,7 +224,7 @@ def train(path, phase, resume=False):
                 for offset in range(start_at,len(items),config.grad_accum):
                     gate();window=epoch_items[offset:offset+config.grad_accum];losses=[]
                     for item in window:
-                        gate();torch.mps.synchronize();torch.mps.empty_cache()
+                        torch.mps.synchronize();torch.mps.empty_cache();gate()
                         encoded=tr.encode_item(tok,item,1024,256,tr.draw_option_order(item,order_rng,config.shuffle_options),False)
                         batch=tr.collate_items([[encoded]],tok.pad_token_id)
                         logits=tr._forward(model,batch,torch.device('mps'),False,True)
@@ -244,12 +254,12 @@ def train(path, phase, resume=False):
             for sig,handler in old.items(): signal.signal(sig,handler)
         training_seconds=elapsed()
         name,hashes=save('checkpoint')
-        after=ml.parameter_hash(model)
+        after=r.parameter_hash_cpu_first(model)
         complete = reason in ('epoch_limit','update_limit','time_limit') and steps>0 and before!=after
         result={'status':'saved' if complete else 'parked','phase':phase,'run_id':job['run_id'],
             'checkpoint':str(folder/name),'checkpoint_name':name,'sha256':hashes,
             'optimizer_updates':steps,'training_seconds':training_seconds,'wall_seconds_including_final_save':elapsed(),
-            'configuration':cfg,'trainable_parameters':trainable,'encoder_unchanged':encoder_before==ml.parameter_hash(model,encoder=True),
+            'configuration':cfg,'trainable_parameters':trainable,'encoder_unchanged':encoder_before==r.parameter_hash_cpu_first(model,encoder=True),
             'head_before_sha256':before,'head_after_sha256':after,'weights_changed':before!=after,
             'history':history,'stop_reason':reason,'raw_evaluation':False,'human_approved':False,'operational_promotion':False}
         r.atomic_json(result_file,result)
@@ -272,7 +282,7 @@ def reload_checkpoint(path, phase):
         r.verify_snapshot(checkpoint,phase_record['checkpoint_files'])
         agent=ml.load_agent(checkpoint,result['sha256'])
         meta=json.loads((checkpoint/'RESEARCH_METADATA.json').read_bytes())
-        if ml.parameter_hash(agent.model)!=meta['exported_head_sha256']: raise ValueError('export reload hash')
+        if r.parameter_hash_cpu_first(agent.model)!=meta['exported_head_sha256']: raise ValueError('export reload hash')
         state=torch.load(checkpoint/'training-state.pt',map_location='cpu',weights_only=True)
         selected=r.select_s1(raw) if phase=='s1' else [x for x in raw if x['meta']['split']=='train']
         selected=adapter.prepare_training_rows(selected,policy.questions(list(policy.CRITERIA)))
@@ -289,7 +299,7 @@ def reload_checkpoint(path, phase):
         out=agent.predict(probe['state'],probe['questions'],max_len=1024,head_max_len=256)
         if out['usage']['truncated']: raise ValueError('reload probe truncation')
         agent.model.load_state_dict(state['head'],strict=False)
-        if ml.parameter_hash(agent.model)!=meta['head_fp32_sha256']: raise ValueError('FP32 head reload')
+        if r.parameter_hash_cpu_first(agent.model)!=meta['head_fp32_sha256']: raise ValueError('FP32 head reload')
         proof={'status':'reloaded','phase':phase,'optimizer_updates':state['step'],
                'export_weights_verified':True,'fp32_head_verified':True,'optimizer_scheduler_verified':True,
                'actual_model_probe':True,'probe_is_training_row':True,'independent_evaluation_started':False,

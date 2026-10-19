@@ -2,7 +2,8 @@
 
 Only the coordinator's fixed S1/R2-A experiment is authorized. A killed process
 cannot silently reserve a new run; clean pauses resume the saved boundary with
-the same cumulative budget. No model, network, DB or subprocess operations here.
+the same cumulative budget. Tensor helpers are lazy imports for private research
+snapshots only; no network, DB or subprocess operations live here.
 """
 from __future__ import annotations
 
@@ -32,6 +33,50 @@ def file_hash(path):
     with Path(path).open('rb') as stream:
         for chunk in iter(lambda: stream.read(4*1024*1024), b''): h.update(chunk)
     return h.hexdigest()
+
+
+def cpu_fp16_state(model):
+    """Match LAYA's export values without allocating FP16 copies on the GPU.
+
+    The live FP32 parameters and their identities are never changed. Moving
+    each detached tensor to CPU *before* casting also bounds temporary device
+    allocations while the frozen encoder is still resident on MPS.
+    """
+    return {name:value.detach().cpu().half().contiguous()
+            for name,value in model.state_dict().items()}
+
+
+def parameter_hash_cpu_first(model, *, encoder=False, export_roundtrip=False):
+    """The installed worker's exact digest contract, without a bytes copy."""
+    result = hashlib.sha256()
+    for name,param in model.named_parameters():
+        if name.startswith('encoder.') != encoder: continue
+        value = param.detach().cpu()
+        if export_roundtrip: value = value.half().float()
+        result.update(name.encode())
+        result.update(memoryview(value.contiguous().numpy()).cast('B'))
+    return result.hexdigest()
+
+
+def save_checkpoint_cpu_first(model, tok, cfg, path):
+    """Write the installed LAYA layout, preserving an existing snapshot.
+
+    Only the allocation location/order changes; tensor precision, metadata
+    formatting and serialized values match laya.train.save_checkpoint.
+    """
+    from safetensors.torch import save_file
+
+    path = Path(path)
+    if path.is_symlink() or path.exists() and any(path.iterdir()):
+        raise FileExistsError('checkpoint preserved')
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    save_file(cpu_fp16_state(model), str(path/'model.safetensors'))
+    model.encoder.config.save_pretrained(str(path/'encoder'))
+    tok.save_pretrained(str(path/'tokenizer'))
+    temporary = path/'rl_agent_config.json.tmp'
+    with temporary.open('x', encoding='utf-8') as stream:
+        json.dump(cfg, stream, indent=2)
+    os.replace(temporary, path/'rl_agent_config.json')
 
 
 def atomic_json(path, value):
