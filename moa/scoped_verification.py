@@ -15,7 +15,7 @@ from .verification import compare_fact_bundle, content_tokens, department_links
 from .clause_correspondence import (clause_correspondence, has_order_dependency, normalize_clause,
                                     ordered_presentation_correspondence, normalize_ordered_presentation)
 
-VERSION = 'moa.scoped-content-gate.v15'
+VERSION = 'moa.scoped-content-gate.v17'
 
 
 def compare_scoped_facts(state):
@@ -62,6 +62,13 @@ def compare_scoped_facts(state):
                     left[field] = [normalize_ordered_presentation(v)[0] for v in left[field]]
                     right[field] = [normalize_ordered_presentation(v)[0] for v in right[field]]
                     transforms.append('ordered_' + field + '_presentation')
+                    continue
+                # A failed literal quotation proof must not be weakened by the
+                # older clause/token path (which canonicalizes spaces/numbers).
+                # Even unchanged quoted clauses conservatively bind this list's
+                # order until there is a separate quotation-aware move proof.
+                if any(re.search(r'''["'“”‘’「」『』\\]''', v)
+                       for v in left.get(field, []) + right.get(field, [])):
                     continue
                 if not independent_context:
                     continue

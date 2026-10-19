@@ -12,7 +12,7 @@ import re
 
 from .verification import content_tokens
 
-VERSION = 'moa.independent-clause.v13'
+VERSION = 'moa.independent-clause.v15'
 # Do not enumerate Korean endings after former/latter: an unseen ending can
 # still bind another field's order. Without a lexical parser, compounds such
 # as '전자공학' conservatively remain strict too. A left lexical boundary
@@ -62,6 +62,25 @@ _MUST_PREFIX = re.compile(r'^(?:' + _NOUN + r'(?:은|는|이|가) )?반드시 '
 _SELECTION = re.compile(r'^(반드시|각자|학생은|참가자는)\s*\d+\s*(?:개|과목).{0,25}선택(?:합니다\.|해야 합니다\.)?$')
 _CONDITIONAL = re.compile(r'^(.{2,45}?(?:면|경우에는|경우에|경우))\s+\S.+(?:합니다|됩니다|바랍니다)\.$')
 _SUBJECT = re.compile(r'^([가-힣0-9 ]{2,35}?)(?:은|는|이|가)\s+\S.+(?:합니다|됩니다|바랍니다)\.$')
+_QUOTE_PAIRS = {'"': '"', "'": "'", '“': '”', '‘': '’', '「': '」', '『': '』'}
+_QUOTE_CLOSE = set(_QUOTE_PAIRS.values())
+
+
+def _closed_literal_prefix(prefix):
+    """All quotes must close before the changed ending, with no escape guesses."""
+    if '\\' in prefix:
+        return False
+    stack = []
+    for char in prefix:
+        if stack and char == stack[-1]:
+            stack.pop()
+        elif char in _QUOTE_PAIRS:
+            stack.append(_QUOTE_PAIRS[char])
+            if len(stack) > 8:
+                return False
+        elif char in _QUOTE_CLOSE:
+            return False
+    return not stack
 
 
 def normalize_ordered_presentation(text):
@@ -71,9 +90,13 @@ def normalize_ordered_presentation(text):
     polarity, roles or facts. References/numbering are allowed here precisely
     because every prefix and every clause position must remain identical.
     """
-    if not isinstance(text, str) or len(text) > 1000 or re.search(r'["\'“”‘’「」『』]', text):
+    if not isinstance(text, str) or len(text) > 1000:
         return text, []
-    value = re.sub(r'\s+', ' ', text).strip()
+    # Quoted bytes, including their whitespace, are never rewritten. Only a
+    # terminal ending OUTSIDE balanced quotes may change. Whole canonical
+    # strings (not bags or filled-in values) must still match independently.
+    quoted = any(c in _QUOTE_PAIRS or c in _QUOTE_CLOSE for c in text)
+    value = text.strip() if quoted else re.sub(r'\s+', ' ', text).strip()
     for name, endings in (
         ('active', ('합니다.', '해요.')),
         ('passive', ('됩니다.', '돼요.')),
@@ -81,10 +104,21 @@ def normalize_ordered_presentation(text):
         ('absent', ('없습니다.', '없어요.')),
     ):
         for ending in endings:
-            if value.endswith(ending) and len(value) > len(ending):
+            if (value.endswith(ending) and len(value) > len(ending) and
+                    _closed_literal_prefix(value[:-len(ending)])):
                 return value[:-len(ending)] + endings[0], ['ordered_present_' + name]
     # ...입니다 can also be a verb (모입니다/보입니다/움직입니다).
     # Neither a suffix nor final-consonant agreement proves a nominal copula.
+    # A separated dependent noun 것 following an adnominal ㄴ/ㄹ/는 has
+    # independent syntactic evidence. Preserve that entire antecedent; do not
+    # generalize to arbitrary ...입니다/이에요 suffixes or lexical nouns.
+    for ending in (' 것입니다.', ' 것이에요.'):
+        if value.endswith(ending):
+            prefix = value[:-len(ending)]
+            if (prefix and '가' <= prefix[-1] <= '힣' and
+                    ((ord(prefix[-1]) - 0xac00) % 28 in (4, 8) or prefix.endswith('는')) and
+                    _closed_literal_prefix(prefix)):
+                return prefix + ' 것입니다.', ['ordered_dependent_noun_copula']
     # Unknown copular paraphrases deliberately retain strict comparison.
     return value, []
 

@@ -34,6 +34,61 @@ def test_only_terminal_present_speech_level_can_change_without_reordering(source
 
 
 @pytest.mark.parametrize('source,dom', [
+    ("'추가 모집'에 참여할 수 있습니다.", "'추가 모집'에 참여할 수 있어요."),
+    ('“안전 체험”은 별관에서 진행됩니다.', '“안전 체험”은 별관에서 진행돼요.'),
+    ('「탐구 주간」에는 예외가 없습니다.', '「탐구 주간」에는 예외가 없어요.'),
+    ('『독서 “짝” 활동』에 참가합니다.', '『독서 “짝” 활동』에 참가해요.'),
+    ('안내에는 "참여합니다."라고 표시합니다.', '안내에는 "참여합니다."라고 표시해요.'),
+])
+@pytest.mark.parametrize('field', ['facts', 'conditions', 'notes'])
+def test_literal_balanced_quotation_before_unquoted_terminal_ending_is_preserved(source, dom, field):
+    # The quotation itself is immutable; a blanket quotation veto recreates FP.
+    assert compare({field: [source]}, {field: [dom]})['quality_label'] == 'preserved'
+    assert compare({field: [dom]}, {field: [source]})['quality_label'] == 'preserved'
+
+
+@pytest.mark.parametrize('prefix', ['참가 기회가 늘어날', '서류를 확인할 수 있을', '보호자가 동의한'])
+def test_separate_dependent_noun_copula_retains_its_entire_adnominal_prefix(prefix):
+    # Explicit separated 것 + copula, not a final-consonant or verb-stem guess.
+    source, dom = prefix + ' 것입니다.', prefix + ' 것이에요.'
+    assert compare({'facts': [source]}, {'facts': [dom]})['quality_label'] == 'preserved'
+    assert compare({'facts': [dom]}, {'facts': [source]})['quality_label'] == 'preserved'
+
+
+@pytest.mark.parametrize('source,dom', [
+    ("'필수' 항목이 있습니다.", "'선택' 항목이 있어요."),
+    ('“참여합니다.”라고 안내합니다.', '“참여해요.”라고 안내해요.'),
+    ('“별관에서 진행됩니다.”', '“별관에서 진행돼요.”'),
+    ("'필수 항목이 있습니다.", "'필수 항목이 있어요."),
+    ('「선택』 항목이 있습니다.', '「선택』 항목이 있어요.'),
+    ('“「선택”」 항목이 있습니다.', '“「선택”」 항목이 있어요.'),
+    ('"선택\\" 항목이 있습니다.', '"선택\\" 항목이 있어요.'),
+    ('참가할 것입니다.', '참가하지 않을 것이에요.'),
+    ('선택해야 할 것입니다.', '선택할 것이에요.'),
+    ('참가할 것입니다.', '참가한 것이에요.'),
+    ('선택할 것입니다.', '선택할 것예요.'),
+    ('이것입니다.', '이것이에요.'),
+    ('안내문을 죽입니다.', '안내문을 죽이에요.'),
+    ('성장할 수 있을 것입니다.', '성장할 수 있을것이에요.'),
+])
+def test_quotation_and_copula_proof_never_rewrites_content_or_guesses_verbs(source, dom):
+    assert compare({'facts': [source]}, {'facts': [dom]})['quality_label'] == 'changed'
+
+
+@pytest.mark.parametrize('source,dom', [
+    ("학생은 '필수 항목을 확인합니다.", "학생은 '필수 항목을 확인해요."),
+    ('학생은 「필수』 항목을 확인합니다.', '학생은 「필수』 항목을 확인해요.'),
+    ("학생은 \\'필수\\' 항목을 확인합니다.", "학생은 \\'필수\\' 항목을 확인해요."),
+    ('학생은 『「필수』」 항목을 확인합니다.', '학생은 『「필수』」 항목을 확인해요.'),
+    ("학생은 '추가  모집' 항목을 확인합니다.", "학생은 '추가 모집' 항목을 확인해요."),
+    ("학생은 '2개'를 선택합니다.", "학생은 '2 개'를 선택해요."),
+])
+def test_failed_literal_quote_proof_cannot_fall_back_to_fuzzy_clause_tokens(source, dom):
+    # A legacy clause normalization must not override the failed literal proof.
+    assert compare({'facts': [source]}, {'facts': [dom]})['quality_label'] == 'changed'
+
+
+@pytest.mark.parametrize('source,dom', [
     ('준비물은 개인용 필기구입니다.', '준비물은 개인용 필기구예요.'),
     ('참가 대상은 보호자와 학생입니다.', '참가 대상은 보호자와 학생이에요.'),
 ])
