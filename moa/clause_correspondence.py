@@ -12,7 +12,7 @@ import re
 
 from .verification import content_tokens
 
-VERSION = 'moa.independent-clause.v11'
+VERSION = 'moa.independent-clause.v12'
 # Do not enumerate Korean endings after former/latter: an unseen ending can
 # still bind another field's order. Without a lexical parser, compounds such
 # as '전자공학' conservatively remain strict too. A left lexical boundary
@@ -36,9 +36,27 @@ _STYLE = re.compile(r'^(.+?)(' + _ACTION + r')(합니다|해요)\.?$')
 _OBLIGATION = re.compile(r'^(.+?)(' + _ACTION + r')(?:하여야|해야) 합니다\.?$')
 _REQUEST = re.compile(r'^(.+?)(' + _ACTION + r')(?:해 주세요|하십시오|하세요)\.?$')
 # Only a short single-positive prefix can bind '반드시' to the final action.
-# This is not proof of a noun's semantic role: no actor/object movement is
-# permitted, including seemingly atomic nouns that could be Korean numerals.
+# This prefix alone is not a role proof. Case-bound movement uses the separate
+# full-clause grammar below, excluding quantified or restrictive arguments.
 _NOUN = r'[가-힣]{2,24}?'
+_ROLE_NOUN = r'[가-힣]{1,24}?'
+_ROLE_END = r'(?:합니다|해요|해야 합니다|하여야 합니다|해 주세요|하십시오|하세요)\.?'
+_SVO = re.compile(r'^(' + _ROLE_NOUN + r')(은|는|이|가) 반드시 (' + _ROLE_NOUN +
+                  r')(을|를) (' + _ACTION + r')' + _ROLE_END + r'$')
+_OSV = re.compile(r'^(' + _ROLE_NOUN + r')(은|는) (' + _ROLE_NOUN +
+                  r')(이|가) 반드시 (' + _ACTION + r')' + _ROLE_END + r'$')
+# Atomic case marking does not prove quantifier scope. Exclude quantified,
+# reflexive, additive/restrictive or connective arguments rather than deleting
+# their particles or guessing that a number-looking prefix is a quantifier.
+# Ambiguous '전-' arguments (including genuine compound nouns) stay strict;
+# this shallow grammar is not a complete Korean morphological analyser.
+_ROLE_SCOPE = re.compile(r'모든|모두|전부|전원|일체|일부|각자|각각|각기|누구|누군|아무|'
+                         r'여러|여럿|다수|소수|자신|자기|서로|몇|매번|적어도|'
+                         r'^전|개개|일동|전체|총원|양측|양쪽|양편|양자|쌍방|절반|과반|대부분')
+_NUMBER = r'(?:하나|한|둘|두|셋|세|넷|네|다섯|여섯|일곱|여덟|아홉|열|스무|스물|일|이|삼|사|오|육|칠|팔|구|십|백|천|만)'
+_NUMBER_ARGUMENT = re.compile(r'^(?:' + _NUMBER + r')+(?:명|개|과목|가지|번|회|장|부|권|인|쪽|편|측)?$|^각인$')
+_ROLE_SUFFIX = re.compile(r'(?:만|도|뿐|조차|마저|까지|부터|마다|라도|든|의|하고|하며|하면|거나|해서|하여|'
+                          r'에게|에게서|한테|한테서|께|께서|에서|으로|로|로서|로써|에|처럼|같이|보다|대로)$')
 _MUST_PREFIX = re.compile(r'^(?:' + _NOUN + r'(?:은|는|이|가) )?반드시 '
                           r'(?:' + _NOUN + r'(?:을|를)|\d+\s*(?:개|과목)(?:을|를)?) $')
 _SELECTION = re.compile(r'^(반드시|각자|학생은|참가자는)\s*\d+\s*(?:개|과목).{0,25}선택(?:합니다\.|해야 합니다\.)?$')
@@ -60,6 +78,32 @@ def _simple_value(value):
     if re.fullmatch(r'\d{1,2}:\d{2}(?:\s*[~～–-]\s*\d{1,2}:\d{2})?', value):
         return True  # A complete clock/range, not a second named field.
     return bool(value.strip()) and not re.search(r'[\r\n.!?;:："“”‘’]', value)
+
+
+def role_bindings(text):
+    """Bounded positive must-clause: one atomic actor/object, explicit cases.
+
+    No synonym lookup, noun sorting, quantifier movement or missing-role fill.
+    Unknown/modifying phrases remain strict. Bindings come from THIS text only.
+    """
+    if not isinstance(text, str) or len(text) > 1000 or _DEPENDENT.search(text):
+        return None
+    svo, osv = _SVO.fullmatch(text), _OSV.fullmatch(text)
+    if svo:
+        actor, actor_case, obj, object_case, action = svo.groups()
+    elif osv:
+        obj, object_case, actor, actor_case, action = osv.groups()
+    else:
+        return None
+    for noun, case in ((actor, actor_case), (obj, object_case)):
+        consonant = (ord(noun[-1]) - 0xac00) % 28 != 0
+        allowed = ('은', '이', '을') if consonant else ('는', '가', '를')
+        if case not in allowed:
+            return None
+    if actor == obj or any(_ROLE_SCOPE.search(v) or _NUMBER_ARGUMENT.fullmatch(v)
+                           or _ROLE_SUFFIX.search(v) for v in (actor, obj)):
+        return None
+    return {'actor': actor, 'object': obj, 'action': action, 'obligation': 'explicit_must'}
 
 
 def normalize_clause(text):
@@ -93,6 +137,15 @@ def normalize_clause(text):
     # literal evidence, including subjects, targets, quantities and negations.
     if re.search(r'[\r\n.!?;:："“”‘’]', text.rstrip('.')):
         return text, []
+    roles = role_bindings(text)
+    if roles:
+        # Canonical particles are calculated from this independently parsed
+        # noun, never borrowed from the other document's words or bindings.
+        actor, obj = roles['actor'], roles['object']
+        topic = '은' if (ord(actor[-1]) - 0xac00) % 28 else '는'
+        case = '을' if (ord(obj[-1]) - 0xac00) % 28 else '를'
+        return (actor + topic + ' 반드시 ' + obj + case + ' ' + roles['action'] +
+                '해야 합니다.'), ['case_bound_atomic_roles']
     obligation = _OBLIGATION.fullmatch(text)
     if obligation:
         prefix, action = obligation.groups()
@@ -155,5 +208,7 @@ def clause_correspondence(source, dom):
             'complete_clause_tokens_equal': all(content_tokens(v) == content_tokens(dom[j])
                                                 for v, j in zip(source, mapping)),
             'canonical_clause_tokens_equal': True,
+            'source_role_bindings': [role_bindings(v) for v in source],
+            'dom_role_bindings': [role_bindings(dom[j]) for j in mapping],
             'source_rule_ids': [v[1] for v in source_normal],
             'dom_rule_ids': [v[1] for v in dom_normal]}

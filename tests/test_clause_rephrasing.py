@@ -223,12 +223,9 @@ def test_reference_guard_does_not_depend_on_enumerating_korean_endings(reference
 @pytest.mark.parametrize('source,actual', [
     ('전원은 반드시 하나를 선택해야 합니다.', '하나는 전원이 반드시 선택해야 합니다.'),
     ('학생은 반드시 하나를 선택해야 합니다.', '하나는 학생이 반드시 선택해야 합니다.'),
-    ('학생은 반드시 보안경을 지참합니다.', '보안경은 학생이 반드시 지참합니다.'),
-    ('학생은 반드시 보호자를 확인합니다.', '보호자는 학생이 반드시 확인합니다.'),
 ])
-def test_role_topicalization_needs_a_proof_not_available_in_this_grammar(source, actual):
-    # Some of these pairs can be equivalent; this checker does not have a
-    # dependency/quantifier proof and must not silently waive the difference.
+def test_quantified_role_topicalization_still_needs_a_scope_proof(source, actual):
+    # A bounded atomic case proof still cannot waive quantifier scope.
     assert check({'conditions': [source]}, {'conditions': [actual]})['quality_label'] == 'changed'
 
 

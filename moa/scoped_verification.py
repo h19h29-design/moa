@@ -14,7 +14,7 @@ import re
 from .verification import compare_fact_bundle, content_tokens, department_links
 from .clause_correspondence import clause_correspondence, has_order_dependency, normalize_clause
 
-VERSION = 'moa.scoped-content-gate.v13'
+VERSION = 'moa.scoped-content-gate.v14'
 
 
 def compare_scoped_facts(state):
