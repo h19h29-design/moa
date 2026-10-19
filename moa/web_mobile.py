@@ -109,6 +109,10 @@ class MobileMixin:
             content+='<p class="card">자료 활용 분류: %s · <a href="/corpus/detail?id=%s">파일별 분류 확인·수정</a></p>' % (esc(USES[curation['use']] if curation else '미분류'),esc(row['origin_notice_id']))
         if old: content += '<p class="warning">과거 버전입니다. <a href="/notice?id=%s">최신 버전 열기</a></p>' % esc(ident)
         if rev:
+            # Read-only sidecar, after route authentication, bound to this exact
+            # source-file role inventory and rendered revision. No DB changes.
+            from . import review_evidence
+            content += review_evidence.render(review_evidence.load(self.store, ident, rev, files))
             from .worker_api import evidence_state
             checks = [e for e in evidence_state(self.store, ident) if e['render_revision'] == rev['id']]
             if checks:
