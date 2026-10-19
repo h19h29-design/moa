@@ -22,6 +22,10 @@ STYLE = ('label{display:block;margin:12px 0}label input:not([type=checkbox]),lab
          '.cell-editor{display:grid;grid-template-columns:1fr auto;gap:8px;margin:10px 0}.cell-editor .coords{max-width:160px;font-size:12px}'
          '.coords input[type=number]{width:45px}.cell-editor label{margin:4px 0}.login{max-width:400px;margin:12vh auto}'
          'h1,h2,h3,p,a{overflow-wrap:anywhere}input[type=file]{width:100%}.cols>*{min-width:0}'
+         '.evidence-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}'
+         '.evidence-comparison pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:440px;overflow:auto}'
+         'mark.evidence-diff{background:#fff09b;color:#432d00}.review-jumps{display:flex;gap:16px;flex-wrap:wrap}'
+         '@media(max-width:700px){.evidence-comparison{grid-template-columns:1fr}}'
          '@media(max-width:700px){.file-options{grid-template-columns:1fr}.preview{height:650px}.cell-editor{grid-template-columns:1fr}.cell-editor .coords{max-width:100%}}')
 
 
@@ -108,11 +112,15 @@ class MobileMixin:
             curation=get_record(self.store,row['origin_notice_id'])
             content+='<p class="card">자료 활용 분류: %s · <a href="/corpus/detail?id=%s">파일별 분류 확인·수정</a></p>' % (esc(USES[curation['use']] if curation else '미분류'),esc(row['origin_notice_id']))
         if old: content += '<p class="warning">과거 버전입니다. <a href="/notice?id=%s">최신 버전 열기</a></p>' % esc(ident)
+        hold_suggestion, hold_explanation = 'unconfirmed', ''
         if rev:
             # Read-only sidecar, after route authentication, bound to this exact
             # source-file role inventory and rendered revision. No DB changes.
             from . import review_evidence
-            content += review_evidence.render(review_evidence.load(self.store, ident, rev, files))
+            evidence = review_evidence.load(self.store, ident, rev, files)
+            hold_suggestion, hold_explanation = review_evidence.suggest_hold(evidence)
+            content += '<p class="review-jumps"><a href="#notice-comparison">원본·모바일 비교로 이동</a><a href="#notice-review">승인·보류로 이동</a></p>'
+            content += review_evidence.render(evidence)
             from .worker_api import evidence_state
             checks = [e for e in evidence_state(self.store, ident) if e['render_revision'] == rev['id']]
             if checks:
@@ -165,7 +173,7 @@ class MobileMixin:
                 originals += '<details><summary>%s · PDF 원본 보기</summary><iframe src="/mobile/original?id=%s&file=%s"></iframe></details>' % (esc(file['filename']),esc(ident),esc(file['id']))
         for source in data.get('sources',[]):
             originals += '<details open><summary>원문 추출 텍스트 · 파일 %s</summary><pre>%s</pre></details>' % (esc(source['file_id']),esc(source.get('text','')))
-        content += ('<h2>2. 원문과 모바일 결과 비교</h2><div class="cols"><section class="card"><h3>원본</h3><p class="muted">HWP·DOCX 원본은 위 다운로드에서 열어 대조하세요.</p>%s</section>'
+        content += ('<h2 id="notice-comparison">2. 원문과 모바일 결과 비교</h2><div class="cols"><section class="card"><h3>원본</h3><p class="muted">HWP·DOCX 원본은 위 다운로드에서 열어 대조하세요. 아래는 추출 텍스트이며 원본 페이지 이미지가 아닙니다.</p>%s</section>'
                     '<section class="card"><h3>모바일 결과</h3><iframe title="모바일 안내 미리보기" class="preview" src="/mobile/preview?id=%s&revision=%s"></iframe></section></div>') % (originals,esc(ident),esc(rev['id']))
         content += '<section class="card"><h2>변환에 사용한 규칙·승인 사례</h2>'
         for audit in data.get('recommendations',[]):
@@ -184,21 +192,24 @@ class MobileMixin:
                 '<details><summary>구조 JSON 직접 수정 (고급)</summary><textarea id="blocks" name="blocks">%s</textarea></details>'
                 '<button class="ok">수정 저장 후 재검토</button></form></details><script src="/static/mobile.js" defer></script>') % (
                     esc(ident),esc(rev['id']),esc(data['title']),esc(json.dumps(data['blocks'],ensure_ascii=False,indent=1)))
-            reasons = ''.join('<option value="%s">%s</option>' % (key,esc(label)) for key,label in mobile.REASONS.items())
-            content += ('<section class="card"><h2>4. 이 버전 검수</h2><form action="/mobile/review" method="post">'+self._csrf_field()+
+            reasons = ''.join('<option value="%s"%s>%s</option>' % (key,' selected' if key==hold_suggestion else '',esc(label)) for key,label in mobile.REASONS.items())
+            suggestion = ('보류 사유 자동 제안: '+mobile.REASONS[hold_suggestion]+' · '+hold_explanation+
+                          ' (아래 사유·메모에서 변경 가능, 아직 저장되지 않음)') if hold_explanation else '보류 기본값: 아직 미확인 · 필요하면 사유·메모에서 변경하세요.'
+            content += ('<section class="card" id="notice-review"><h2>4. 이 버전 검수</h2><form action="/mobile/review" method="post">'+self._csrf_field()+
                 '<input name="id" type="hidden" value="%s"><input name="revision" type="hidden" value="%s">'
                 '<input name="review_mode" type="hidden" value="quick">'
                 '<p>내용이 맞으면 승인, 문제가 있거나 아직 확인하지 못했으면 보류하세요.</p>'
                 '<p class="muted">승인은 원문·표 관계·파일 역할·이용 권한·개인정보 확인 완료를 뜻합니다. 검수 번호와 시각은 자동 기록됩니다.</p>'
                 '<div class="quick-actions"><button name="action" value="approved" class="ok">승인</button>'
                 '<button name="action" value="held" class="hold">보류</button></div>'
+                '<p class="muted">%s</p>'
                 '<details><summary>사유·메모 / 반려·승인취소 (선택)</summary>'
                 '<label>보류·반려 사유 <select name="reason">%s</select></label>'
                 '<label>메모 <textarea name="note" maxlength="2000" style="min-height:70px"></textarea></label>'
                 '<div class="actions"><button name="action" value="rejected" class="bad">반려</button>'
                 '<button name="action" value="candidate">승인취소 / 재검토</button></div></details></form>'
                 '<p class="muted">보류는 오답 확정이 아닙니다. 파일·내용 변경 시 새 버전을 다시 검수합니다.</p></section>') % (
-                    esc(ident),esc(rev['id']),reasons)
+                    esc(ident),esc(rev['id']),esc(suggestion),reasons)
         content += '<section class="card"><h2>HTML·첨부 이용</h2><p><a href="/mobile/html?id=%s">HTML 다운로드</a> · <a href="/mobile/bundle?id=%s">HTML + 실제 원본 파일 ZIP 다운로드</a></p><p class="muted">미검수 결과에는 미검수 표시가 유지됩니다. ZIP을 풀고 index.html을 열면 첨부도 함께 열립니다.</p></section>' % (esc(ident),esc(ident))
         content += '<section class="card"><h2>변경 이력</h2>'
         for history in self.store.db.execute('SELECT sequence,id,created_at FROM mobile_revisions WHERE notice_id=? ORDER BY sequence DESC',(ident,)):

@@ -7,6 +7,7 @@ selected its existing document/revision. No arbitrary filesystem path is used.
 from __future__ import annotations
 
 import hashlib
+from difflib import SequenceMatcher
 from html import escape
 import json
 import re
@@ -107,6 +108,17 @@ def load(store, ident, revision, files):
                         model['source_revision'] != doc['source_revision'] or model['render_revision'] != revision['id']):
                     raise ValueError('raw-model revision mismatch')
                 if not _text(model.get('status', 'model_not_run')): raise ValueError('bounded model status')
+                if 'nli' in model:
+                    nli=model['nli']
+                    if (not isinstance(nli,dict) or nli.get('semantic_relation') not in
+                            ('equivalent','contradiction','not_entailed','incomplete') or
+                            not isinstance(nli.get('direction_counts'),dict) or
+                            set(nli['direction_counts'])!={'source_to_dom','dom_to_source'}):
+                        raise ValueError('explicit raw NLI directions')
+                    for counts in nli['direction_counts'].values():
+                        if (not isinstance(counts,dict) or set(counts)!={'entailment','neutral','contradiction'} or
+                                any(type(v) is not int or not 0<=v<=2000 for v in counts.values())):
+                            raise ValueError('bounded original NLI label counts')
                 if model.get('status') == 'completed' and not _current_model(model, section, doc):
                     model['status'] = 'historical_input_not_reinferred'
         return dict(doc, status='current', human_approved=False, training_allowed=False)
@@ -126,14 +138,65 @@ def render(report):
         content += '<p>규칙: '+LABELS[section['direct_label']]+' · 종합: '+LABELS[section['final_label']]+'</p>'
         for model in section['models']:
             status = model.get('status', 'model_not_run')
-            content += '<p>'+esc(model['name'])+' 원판정: '+LABELS.get(model.get('prediction'), '미완료')+' · '+esc(REASONS.get(status, status))+'</p>'
+            unknown='의미 일치 미확정' if 'nli' in model else '미완료'
+            content += '<p>'+esc(model['name'])+' 원판정: '+LABELS.get(model.get('prediction'), unknown)+' · '+esc(REASONS.get(status, status))+'</p>'
+            if 'nli' in model:
+                for direction,counts in model['nli']['direction_counts'].items():
+                    content+='<p class="muted">'+esc(direction)+': '+esc(' / '.join(k+' '+str(v) for k,v in counts.items()))+'</p>'
+                content+='<p class="muted">neutral은 원문 부족 판정이 아닙니다. contradiction도 모든 문서 오류를 뜻하지 않습니다. 근거 확인·사람 승인과 별개인 시험 결과입니다.</p>'
         content += '<p class="warning">'+esc(reasons)+'</p>'
         evidence = section.get('evidence', {})
         states = lambda v: '확보' if v is True else '부족' if v is False else '미확인'
         content += '<p class="muted">근거: '+esc(' · '.join(name+': '+states(evidence.get(key)) for name,key in (
             ('전체 페이지','file_complete'),('해당 구역','scope_complete'),('표 문맥','table_context_complete'),('파일 역할','role_confirmed'))))+'</p>'
-        content += '<details><summary>원문 구역 ↔ 실제 모바일 내용 비교</summary><div class="cols"><div><h4>원문 추출 구역</h4><pre>'+esc(section['source_excerpt'])+'</pre></div><div><h4>실제 HTML 구역</h4><pre>'+esc(section['dom_excerpt'])+'</pre></div></div><p class="muted">추출 내용만으로 전체 원문을 보증하지 않습니다. 아래 원본 파일도 함께 확인하세요.</p></details></article>'
+        left, right = _difference(section['source_excerpt'], section['dom_excerpt'],
+                                  section['direct_label'] == 'changed')
+        content += ('<div class="evidence-comparison"><div data-side="source"><h4>원문 추출 구역</h4><pre>'+left+
+                    '</pre></div><div data-side="dom"><h4>실제 HTML 구역</h4><pre>'+right+'</pre></div></div>'
+                    '<p class="muted">노란색은 이 구역의 문자 차이입니다. 의미 오류 확정이나 사람 승인이 아닙니다. '
+                    '추출 내용만으로 전체 원문을 보증하지 않으므로 아래 원본 파일도 확인하세요.</p></article>')
     return content+'</section>'
+
+
+def _difference(source, dom, highlight):
+    """Escaped display-only differences, retaining every character on both sides.
+
+    The bounded fallback marks whole texts, not a silently shortened excerpt.
+    Neither matching nor display can repair/approve the rendered document.
+    """
+    if not highlight or source == dom:
+        return escape(source), escape(dom)
+    tokenize = lambda text: re.findall(r'\s+|[가-힣A-Za-z_]+|\d+|[^\s]', text)
+    left, right = tokenize(source), tokenize(dom)
+    if len(left) + len(right) > 6000:
+        return '<mark class="evidence-diff">'+escape(source)+'</mark>', '<mark class="evidence-diff">'+escape(dom)+'</mark>'
+    result = [[], []]
+    for tag, a, b, c, d in SequenceMatcher(None, left, right, autojunk=False).get_opcodes():
+        for side, value in enumerate((''.join(left[a:b]), ''.join(right[c:d]))):
+            safe = escape(value)
+            result[side].append('<mark class="evidence-diff">'+safe+'</mark>' if tag != 'equal' and value else safe)
+    return tuple(''.join(parts) for parts in result)
+
+
+def suggest_hold(report):
+    """An editable UI suggestion only; unknown evidence is not a proven error."""
+    if report.get('status') != 'current': return 'unconfirmed', ''
+    sections = report.get('sections', [])
+    reasons = {r for s in sections for r in s['reasons']}
+    if 'missing_file_pages' in reasons:
+        return 'incomplete', '확보하지 못한 원본 페이지가 있습니다.'
+    if any(s['direct_label'] == 'changed' for s in sections):
+        findings = set()
+        for section in sections:
+            direct = section.get('direct_report')
+            if isinstance(direct, dict) and isinstance(direct.get('findings'), list):
+                findings.update(f for f in direct['findings'] if isinstance(f, str))
+        if findings & {'row_relation_mismatch', 'merge_relation_mismatch', 'headers_mismatch', 'position_dependent_row_order'}:
+            return 'table', '원문과 모바일 표의 연결·머리글·순서를 확인하세요.'
+        return 'other', '원문과 모바일의 날짜·금액·조건 또는 내용 차이를 확인하세요.'
+    if reasons:
+        return 'unconfirmed', ' · '.join(REASONS.get(r, r) for r in sorted(reasons))[:1200]
+    return 'unconfirmed', ''
 
 
 def learning_eligibility(record, *, protected_hashes, protected_groups):

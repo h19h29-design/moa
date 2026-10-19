@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 
 import pytest
+from bs4 import BeautifulSoup
 
 from moa import review_evidence as e
 from moa.worker_contract import canonical
@@ -37,12 +38,72 @@ def test_revision_bound_sidecar_is_read_only_and_escaped(web):
     browser = login(base)
     page = browser.open(base+'/notice?id='+ident).read().decode()
     assert '원문과 모바일 · 확인할 부분' in page and '원본 파일 0 · 구역 3' in page
-    assert '모바일 금액 5000원' in page and '규칙: 내용 차이' in page
-    assert '&lt;script&gt;unsafe()&lt;/script&gt;' in page and '<script>unsafe()' not in page
+    rendered = BeautifulSoup(page, 'html.parser')
+    assert '모바일 금액 5000원' in rendered.get_text() and '규칙: 내용 차이' in page
+    assert '<script>unsafe()</script>' in rendered.get_text() and '<script>unsafe()' not in page
     assert '이전 입력 결과 · 재추론 아님' in page
     assert store.db.execute('SELECT count(*) FROM mobile_reviews').fetchone()[0] == before
     with pytest.raises(urllib.error.HTTPError) as error: urllib.request.urlopen(base+'/notice?id='+ident)
     assert error.value.code == 401
+
+
+def test_known_content_difference_is_visible_without_opening_comparison_and_escaped(web):
+    store, base = web
+    ident, rev = uploaded(store); doc = record(ident, rev); save(store, doc)
+    page = BeautifulSoup(login(base).open(base+'/notice?id='+ident).read(), 'html.parser')
+    section = page.select_one('.evidence-section')
+    comparison = section.select_one('.evidence-comparison')
+    assert comparison is not None and comparison.find_parent('details') is None
+    assert comparison.select_one('[data-side=source] mark').get_text()
+    assert '5000' in comparison.select_one('[data-side=dom]').get_text()
+    assert not comparison.select('script')
+    assert '원본 파일 0 · 구역 3' in section.get_text()
+
+
+def test_current_sidecar_suggests_editable_hold_reason_but_never_saves_on_get(web):
+    store, base = web; ident, rev = uploaded(store); doc = record(ident, rev)
+    doc['sections'][0]['reasons'] = ['missing_file_pages']; save(store, doc)
+    before = store.db.execute('SELECT count(*) FROM mobile_reviews').fetchone()[0]
+    page = BeautifulSoup(login(base).open(base+'/notice?id='+ident).read(), 'html.parser')
+    form = page.find('form', action='/mobile/review')
+    assert form.select_one('[name=reason] option[selected]')['value'] == 'incomplete'
+    assert form.select_one('[name=reason]').has_attr('disabled') is False
+    assert '자동 제안' in form.get_text()
+    assert form.select_one('[name=note]').get_text() == ''
+    assert store.db.execute('SELECT count(*) FROM mobile_reviews').fetchone()[0] == before
+    doc['html_sha256'] = 'stale'; save(store, doc)
+    page = BeautifulSoup(login(base).open(base+'/notice?id='+ident).read(), 'html.parser')
+    assert page.select_one('form[action="/mobile/review"] [name=reason] option[selected]')['value'] == 'unconfirmed'
+
+
+def test_normal_reordering_does_not_paint_a_confirmed_error_and_note_reason_is_not_training():
+    doc = record('x', {'id':'r','html_sha':'a'*64, 'data':{'files':[]}})
+    doc['status'] = 'current'; doc['sections'][0]['direct_label'] = 'preserved'
+    assert '<mark' not in e.render(doc)
+    assert e.suggest_hold({'status':'missing'}) == ('unconfirmed', '')
+    assert e.suggest_hold({'status':'stale', 'sections':doc['sections']}) == ('unconfirmed', '')
+
+
+def test_native_nli_neutral_is_visible_as_semantic_unresolved_not_missing_source(web):
+    store, base=web;ident,rev=uploaded(store);doc=record(ident,rev)
+    model=doc['sections'][0]['models'][0]
+    model.update(name='Korean NLI',prediction=None,nli={'semantic_relation':'not_entailed',
+                 'direction_counts':{'source_to_dom':{'entailment':1,'neutral':1,'contradiction':0},
+                                     'dom_to_source':{'entailment':2,'neutral':0,'contradiction':0}}})
+    save(store,doc)
+    page=BeautifulSoup(login(base).open(base+'/notice?id='+ident).read(),'html.parser')
+    assert 'neutral' in page.select_one('.evidence-review').get_text()
+    assert 'neutral은 원문 부족 판정이 아닙니다' in page.get_text()
+    assert '의미 일치 미확정' in page.get_text()
+    assert store.db.execute('SELECT count(*) FROM mobile_reviews').fetchone()[0]==0
+
+
+def test_malformed_native_nli_summary_invalidates_sidecar_not_the_review_page(web):
+    store,base=web;ident,rev=uploaded(store);doc=record(ident,rev)
+    doc['sections'][0]['models'][0]['nli']={'semantic_relation':'not_entailed','direction_counts':'not-counts'}
+    save(store,doc)
+    assert e.load(store,ident,rev,rev['data']['files'])['status']=='invalid'
+    assert login(base).open(base+'/notice?id='+ident).status==200
 
 
 @pytest.mark.parametrize('field', ['render_revision', 'html_sha256', 'files_sha256'])
