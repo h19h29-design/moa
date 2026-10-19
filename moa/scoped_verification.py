@@ -12,9 +12,9 @@ import json
 import re
 
 from .verification import compare_fact_bundle, content_tokens, department_links
-from .clause_correspondence import clause_correspondence, has_order_dependency
+from .clause_correspondence import clause_correspondence, has_order_dependency, normalize_clause
 
-VERSION = 'moa.scoped-content-gate.v4'
+VERSION = 'moa.scoped-content-gate.v13'
 
 
 def compare_scoped_facts(state):
@@ -60,8 +60,11 @@ def compare_scoped_facts(state):
                 proof = clause_correspondence(left.get(field, []), right.get(field, []))
                 if proof:
                     correspondence[field] = proof
-                    # Move actual DOM clauses only; do not copy source values.
-                    right[field] = [right[field][i] for i in proof['source_to_dom']]
+                    # Compute each side from its own observed clauses. Never
+                    # fill a DOM value from the corresponding source clause.
+                    left[field] = [normalize_clause(v)[0] for v in left[field]]
+                    actual = [normalize_clause(v)[0] for v in right[field]]
+                    right[field] = [actual[i] for i in proof['source_to_dom']]
                     transforms.append('independent_' + field + '_correspondence')
             if transforms:
                 normalized['source_blocks'][0]['text'] = json.dumps(left, ensure_ascii=False)
