@@ -12,9 +12,10 @@ import json
 import re
 
 from .verification import compare_fact_bundle, content_tokens, department_links
-from .clause_correspondence import clause_correspondence, has_order_dependency, normalize_clause
+from .clause_correspondence import (clause_correspondence, has_order_dependency, normalize_clause,
+                                    ordered_presentation_correspondence, normalize_ordered_presentation)
 
-VERSION = 'moa.scoped-content-gate.v14'
+VERSION = 'moa.scoped-content-gate.v15'
 
 
 def compare_scoped_facts(state):
@@ -53,9 +54,16 @@ def compare_scoped_facts(state):
                 left = dict(left, headers=headers[:3], rows=flat)
                 transforms.append('explicit_repeated_department_triples_to_keyed_list')
             for field in ('conditions', 'notes', 'facts'):
-                if not independent_context:
-                    break
                 if left.get(field, []) == right.get(field, []):
+                    continue
+                ordered = ordered_presentation_correspondence(left.get(field, []), right.get(field, []))
+                if ordered:
+                    correspondence[field] = ordered
+                    left[field] = [normalize_ordered_presentation(v)[0] for v in left[field]]
+                    right[field] = [normalize_ordered_presentation(v)[0] for v in right[field]]
+                    transforms.append('ordered_' + field + '_presentation')
+                    continue
+                if not independent_context:
                     continue
                 proof = clause_correspondence(left.get(field, []), right.get(field, []))
                 if proof:

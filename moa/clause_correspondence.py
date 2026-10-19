@@ -12,7 +12,7 @@ import re
 
 from .verification import content_tokens
 
-VERSION = 'moa.independent-clause.v12'
+VERSION = 'moa.independent-clause.v13'
 # Do not enumerate Korean endings after former/latter: an unseen ending can
 # still bind another field's order. Without a lexical parser, compounds such
 # as '전자공학' conservatively remain strict too. A left lexical boundary
@@ -62,6 +62,46 @@ _MUST_PREFIX = re.compile(r'^(?:' + _NOUN + r'(?:은|는|이|가) )?반드시 '
 _SELECTION = re.compile(r'^(반드시|각자|학생은|참가자는)\s*\d+\s*(?:개|과목).{0,25}선택(?:합니다\.|해야 합니다\.)?$')
 _CONDITIONAL = re.compile(r'^(.{2,45}?(?:면|경우에는|경우에|경우))\s+\S.+(?:합니다|됩니다|바랍니다)\.$')
 _SUBJECT = re.compile(r'^([가-힣0-9 ]{2,35}?)(?:은|는|이|가)\s+\S.+(?:합니다|됩니다|바랍니다)\.$')
+
+
+def normalize_ordered_presentation(text):
+    """Terminal present speech level only; the complete ordered prefix stays.
+
+    This proof cannot move clauses, normalize quoted words, or alter modality,
+    polarity, roles or facts. References/numbering are allowed here precisely
+    because every prefix and every clause position must remain identical.
+    """
+    if not isinstance(text, str) or len(text) > 1000 or re.search(r'["\'“”‘’「」『』]', text):
+        return text, []
+    value = re.sub(r'\s+', ' ', text).strip()
+    for name, endings in (
+        ('active', ('합니다.', '해요.')),
+        ('passive', ('됩니다.', '돼요.')),
+        ('exists', ('있습니다.', '있어요.')),
+        ('absent', ('없습니다.', '없어요.')),
+    ):
+        for ending in endings:
+            if value.endswith(ending) and len(value) > len(ending):
+                return value[:-len(ending)] + endings[0], ['ordered_present_' + name]
+    # ...입니다 can also be a verb (모입니다/보입니다/움직입니다).
+    # Neither a suffix nor final-consonant agreement proves a nominal copula.
+    # Unknown copular paraphrases deliberately retain strict comparison.
+    return value, []
+
+
+def ordered_presentation_correspondence(source, dom):
+    """Identity mapping only, with independently canonicalized whole strings."""
+    if not isinstance(source, list) or not isinstance(dom, list) or not source or len(source) != len(dom):
+        return None
+    if not all(isinstance(v, str) for v in source + dom):
+        return None
+    left = [normalize_ordered_presentation(v) for v in source]
+    right = [normalize_ordered_presentation(v) for v in dom]
+    if not any(rules for _, rules in left + right) or [v[0] for v in left] != [v[0] for v in right]:
+        return None
+    return {'version': VERSION, 'source_to_dom': list(range(len(source))),
+            'complete_ordered_prefixes_equal': True,
+            'source_rule_ids': [v[1] for v in left], 'dom_rule_ids': [v[1] for v in right]}
 
 
 def has_order_dependency(value):
