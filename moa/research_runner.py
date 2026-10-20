@@ -17,14 +17,16 @@ from collections import Counter
 DEFAULT_HOST = 'macbookair'
 REMOTE_ROOT = '/Users/jungwoohwang/Library/Application Support/MOA-LAYA'
 RUNNER_NAME = 'moa-research-worker.py'
-ACTIONS = ('inspect', 'train', 'reload', 'blind', 'diagnose')
+ACTIONS = ('inspect', 'train', 'reload', 'blind', 'diagnose', 'evaluate')
 RUN_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{2,79}')
 
 
-def remote_argv(host, tail, run_id=None):
+def remote_argv(host, tail, run_id=None, runner_name=RUNNER_NAME):
     """Build a fixed SSH invocation; the host and action list are whitelisted."""
     if host != DEFAULT_HOST:
         raise ValueError('only the pinned MacBook host is allowed')
+    if not re.fullmatch(r'moa-research-worker(?:-v[1-9][0-9]*)?\.py', runner_name):
+        raise ValueError('fixed research runner name required')
     if not isinstance(tail, list) or not tail or tail[0] not in ACTIONS:
         raise ValueError('only pinned worker actions are allowed')
     for item in tail:
@@ -36,13 +38,13 @@ def remote_argv(host, tail, run_id=None):
         return ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
                 '-o', 'ConnectTimeout=10', '-l', 'jungwoohwang', host,
                 'cd %s && %s %s %s' % (_quote(REMOTE_ROOT + '/incoming/latest'),
-                                       python, RUNNER_NAME, remote)]
+                                       python, runner_name, remote)]
     if not RUN_ID.fullmatch(str(run_id)):
         raise ValueError('unsafe run id')
     folder = _quote(REMOTE_ROOT + '/incoming/' + run_id)
     return ['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
             '-o', 'ConnectTimeout=10', '-l', 'jungwoohwang', host,
-            'cd %s && %s %s %s' % (folder, python, RUNNER_NAME, remote)]
+            'cd %s && %s %s %s' % (folder, python, runner_name, remote)]
 
 
 def _quote(value):

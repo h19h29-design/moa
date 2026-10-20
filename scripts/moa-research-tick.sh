@@ -27,4 +27,5 @@ fi
 trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT
 
 cd "$ROOT"
-"$PY" -m moa.research_cli advance --root "$CAMPAIGN" 2>&1 | tail -40
+"$PY" /Users/mac-mini/.local/bin/dev-storage run Relocated-20261017/work/moa-push -- \
+  "$PY" -m moa.research_cli advance --root "$CAMPAIGN"

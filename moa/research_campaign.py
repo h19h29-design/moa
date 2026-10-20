@@ -129,6 +129,8 @@ class BudgetLedger:
             raise BudgetExhausted('candidate time must be positive')
         if seconds > policy['max_train_time_per_candidate_seconds']:
             raise BudgetExhausted('candidate exceeds per-candidate training cap')
+        if any(e.get('candidate') == candidate for e in self.entries()):
+            raise BudgetExhausted('candidate already charged; resume its existing reservation')
         usage = self.usage(now=now, policy=policy)
         if usage['remaining_candidates'] <= 0:
             raise BudgetExhausted('rolling candidate cap reached')
@@ -139,6 +141,22 @@ class BudgetLedger:
         return self.append({'at': parse_time(now).isoformat(timespec='seconds'),
                             'candidate': candidate, 'train_seconds': seconds,
                             'kind': 'reservation'})
+
+    def charge_to(self, *, now, candidate, cumulative_seconds, evidence):
+        """Append a missing charge, never erase a reservation or rename a run.
+
+        Historical receipts sometimes recorded only the final resume session.
+        If duration cannot be reconstructed, callers charge a conservative upper
+        bound and record that explicitly, rather than invent an actual duration.
+        """
+        charged = sum(float(e.get('train_seconds') or 0) for e in self.entries()
+                      if e.get('candidate') == candidate)
+        extra = max(0., float(cumulative_seconds) - charged)
+        if not extra:
+            return None
+        return self.append({'at': parse_time(now).isoformat(timespec='seconds'),
+                            'candidate': candidate, 'train_seconds': extra,
+                            'kind': 'reconciled_charge', 'evidence': evidence})
 
 
 class Campaign:

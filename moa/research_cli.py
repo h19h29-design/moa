@@ -42,9 +42,15 @@ def summarize_root(root):
                 'real_document_accuracy': None}
     state = json.loads(state_path.read_bytes())
     ledger = rc.BudgetLedger(root / 'BUDGET.jsonl')
-    state['budget'] = ledger.usage(now=rc.parse_time(state.get('started_at') or _now()),
+    state['budget'] = ledger.usage(now=rc.parse_time(_now()),
                                    policy=state.get('policy_snapshot', _fallback_policy()))
     state['paused'] = (root / 'PAUSED').exists()
+    if state.get('alignment_enabled'):
+        aligned = root/'alignment/STATE.json'
+        if aligned.exists():
+            state['previous_campaign_status'] = state['status']
+            state['alignment'] = json.loads(aligned.read_bytes())
+            state['status'] = state['alignment']['status']
     state.setdefault('operational_ready', False)
     state.setdefault('human_approvals', 0)
     return state
@@ -76,6 +82,16 @@ def report_text(root):
                   '- 7일 누적 사용: %.0f초' % state['budget']['rolling_seconds'],
                   '- 오늘 사용: %.0f초' % state['budget']['today_seconds'],
                   '- 남은 후보: %d개' % state['budget']['remaining_candidates'], '']
+    paired_report = root/'alignment/COMPARISON.json'
+    if state.get('alignment') and paired_report.exists():
+        comparison = json.loads(paired_report.read_bytes())
+        lines += ['## 대응 구간 합성 개발 시험 (블라인드·실자료 성적 아님)', '']
+        for model, value in comparison.get('models', {}).items():
+            if model.endswith('_paired'):
+                lines.append('- %s: %s/%s, 정상 오탐 %s, 오류 미검출 %s, 입력 초과 %s' % (
+                    model, value['correct'], value['items'], value['normal_false_alerts'],
+                    value['actual_errors_missed'], value['overflow']))
+        lines.append('')
     lines += ['## 실제 통신문 품질',
               '미완료 — 사람이 확인한 독립 정답과 이용 허가가 있는 자료가 0건이라',
               '실제 통신문 98% 달성은 이 캠페인으로 주장하지 않습니다.']

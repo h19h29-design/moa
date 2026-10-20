@@ -84,6 +84,11 @@ def advance(root=CAMPAIGN):
     if (root / 'PAUSED').exists():
         return {'status': 'PAUSED_BY_OPERATOR'}
     state = json.loads(state_path.read_bytes())
+    if state.get('alignment_enabled'):
+        from .research_alignment import advance as alignment_advance
+        return alignment_advance(root)
+    if state.get('status') == 'RESEARCH_PLATEAU':
+        return {'status': 'RESEARCH_PLATEAU', 'reason': state.get('plateau_reason')}
     run_id = state.get('active_run')
     if not run_id:
         return _maybe_start(root, state)
@@ -98,7 +103,7 @@ def advance(root=CAMPAIGN):
         return {'status': 'TRAINING_INTERRUPTED_OR_PENDING', 'run_id': run_id,
                 'progress_updates': remote.get('progress'),
                 'note': 'a run folder exists without TRAIN_RESULT; retry only at a known checkpoint boundary'}
-    if result.get('status') != 'saved':
+    if result.get('stop_reason') == 'resource_guard' or result.get('status') != 'saved':
         return _resume_if_allowed(root, state, run_id, result)
     if not remote.get('reload'):
         payload = rr.ssh_capture(rr.remote_argv(rr.DEFAULT_HOST, ['reload', '--job', 'JOB.json'],

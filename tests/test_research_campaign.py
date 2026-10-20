@@ -137,3 +137,17 @@ def test_budget_seconds_are_never_negative_even_with_pending_reservation(tmp_pat
     usage = ledger.usage(now=rc.parse_time('2026-10-20T09:05:00+09:00'), policy=policy(tmp_path))
     assert usage['remaining_rolling_seconds'] >= 0
     assert usage['remaining_today_seconds'] >= 0
+
+
+def test_reconciliation_is_append_only_idempotent_and_resumes_do_not_reset_budget(tmp_path):
+    ledger = rc.BudgetLedger(tmp_path/'BUDGET.jsonl')
+    now = '2026-10-20T18:00:00+09:00'
+    ledger.reserve(now=now, policy=policy(tmp_path), candidate='a', train_seconds=720)
+    ledger.charge_to(now=now, candidate='a', cumulative_seconds=1800,
+                     evidence='conservative bound across old resume receipts')
+    assert ledger.charge_to(now=now, candidate='a', cumulative_seconds=1800, evidence='again') is None
+    usage = ledger.usage(now=now, policy=policy(tmp_path))
+    assert usage['rolling_seconds'] == 1800
+    assert usage['candidates'] == 1
+    with pytest.raises(rc.BudgetExhausted, match='already charged'):
+        ledger.reserve(now=now, policy=policy(tmp_path), candidate='a', train_seconds=720)
