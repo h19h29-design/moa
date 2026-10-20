@@ -1,0 +1,109 @@
+# MOA 무인 학습 캠페인 — 실행 기록 (2026-10-20)
+
+이 문서는 계획서가 아니라 **실제로 실행한 것과 그 결과**만 기록한다. 확인하지 못한 항목은 미완료로 남긴다.
+
+## 1. 이번에 새로 만든 것
+
+기존 저장소에는 모델·학습 러너·평가 도구는 있었지만, **사람이 지시하지 않아도 도는 캠페인 제어 계층이 없었다.** 이번에 다음을 구현했다.
+
+| 모듈 | 역할 | 상태 |
+| --- | --- | --- |
+| `moa/research_campaign.py` | 예산 원장(7일 이동·일별·후보별 상한), 원자적 상태 파일, 일시중지 마커, 가설 선택기, tiny gate | 구현·테스트 완료 |
+| `moa/research_dataset.py` | 12종 레이아웃 × 16개 변형의 자체 작성 합성 자료 + 독립 정답 재검증, 가족 단위 분할, gold 제거 투영 | 구현·테스트 완료 |
+| `moa/research_runner.py` | 맥북 SSH 고정 명령, 작업 봉인 페이로드, 동일 분모 비교, 채택 판정 | 구현·테스트 완료 |
+| `moa/research_cli.py` | `status / start / advance / pause / resume / report / prepare / datasets` | 구현·테스트 완료 |
+| `scripts/moa-research-worker.py` | 맥북에서 실제 학습·저장·별도 재로딩·추론 | 구현, 실제 실행 확인 |
+| `scripts/moa-research-publish.py` | 미니에서 작업 발행·전송·점검 | 구현, 실제 실행 확인 |
+
+테스트: 새 테스트 37개 작성, 전체 회귀 `851 passed, 2 skipped` (변경 전 기준) 확인.
+
+## 2. 실제 학습 결과 (맥북 M1, LAYA)
+
+부모 모델은 기존 R1 체크포인트를 그대로 사용했다. encoder는 동결하고 head만 학습했다.
+
+| 후보 | 설정 | updates | 학습시간 | dev 64문항 정답 | 정상 오탐 | 변경→정상 오판 |
+| --- | --- | --- | --- | --- | --- | --- |
+| R1 (기존) | 학습 없음 | - | - | 17/64 (26.6%) | 0 | 35 |
+| r2b_v1 | 2 epoch, 68 updates | 68 | 365초 | 36/64 (56.3%) | 15 | 3 |
+| r2b_v2 | 데이터 결함 수정 후 재학습 | 68 | 364초 | 36/64 (56.3%) | 15 | 4 |
+| r2b_v3 | 클래스 prior 보정(E4) | 68 | 373초 | 36/64 (56.3%) | 15 | 4 |
+
+체크포인트는 모두 별도 프로세스에서 재로딩해 검증했다(`separate_process: true`).
+
+### 2-1. 정직하게 말해야 하는 부분
+
+세 후보의 정답 수가 **정확히 36/64로 같다.** 이는 dev의 `changed` 문항 수(36개)와 일치한다. 즉 모델이 내용을 구분한 것이 아니라 **대부분을 `changed`로 찍고 있는 것**에 가깝다. 실제 예측 분포는 `changed 53 / preserved 8 / insufficient 3`이다.
+
+따라서 다음 두 문장은 서로 다른 얘기다.
+
+- 참: R1보다 미탐(변경→정상)이 35건에서 3~4건으로 줄었다.
+- 거짓: 모델이 문서 차이를 이해하게 되었다.
+
+정상 오탐이 15건 발생한 것도 같은 원인이다. 이 상태를 "학습 성공"이라고 부르지 않는다.
+
+## 3. 발견해서 고친 문제
+
+1. **토큰 초과(1105 > 1024)**: 원문 블록에 JSON을 그대로 넣어 같은 내용이 두 번 들어갔다. 사람이 읽는 안내문 텍스트 + 모바일 카드 텍스트로 바꿔 해결했다.
+2. **학습 행이 item으로 변환되지 않음**: 라벨을 떼고 보낸 탓에 `items_from_rows`가 0건을 반환했다. train split에만 gold를 붙이도록 분리했다.
+3. **공백 변형이 문장을 훼손**: 한 글자 단위 공백 삽입으로 단어가 붙어버렸다. 단어 경계를 보존하는 공백 변형으로 교체했다.
+4. **scp 경로 인용 오류**: 공백 포함 원격 경로 전송이 실패해 tar 스트림 방식으로 바꿨다.
+5. **새 run 폴더에 러너 부재**: 발행 스크립트가 러너·라이브러리를 함께 설치하도록 수정했다.
+
+## 4. tiny 과적합 진단 — 모델은 배울 수 있다
+
+27문항(범주별 9개)으로 40 updates만 학습한 결과다.
+
+| 구분 | 정답 | changed | preserved | insufficient |
+| --- | --- | --- | --- | --- |
+| 학습 전 | 9/27 (33.3%) | 0% | 100% | 0% |
+| 40 updates 후 | **25/27 (92.6%)** | 100% | 77.8% | 100% |
+
+loss는 1.20 → 0.015까지 떨어졌다. 즉 **head는 세 범주를 학습할 수 있다.** 본학습이 Flat 36/64에 머문 이유는 모델 능력이 아니라 학습 설정(학습률 3e-4, 업데이트 68회)이었다. 진단은 1e-3에서 수렴했다.
+
+이 진단은 train 부분집합에 대한 과적합 시험이므로 일반화 성능이 아니다. "내용을 이해한다"는 증거로 쓰지 않는다.
+
+### 4-1. 이어진 실험과 자원 보호
+
+- E4(학습률 1e-3, 120 updates)를 발행해 학습을 시작했다.
+- 21 updates에서 맥북 `runtime.resources()`의 `train_allowed=False`로 안전 중단됐다. 사용자가 맥북을 쓰기 시작해 `idle_seconds`가 4초로 떨어진 것이 원인이다.
+- 이는 고장이 아니라 **설계된 자원 보호**다. 체크포인트는 `checkpoint-0021`로 저장됐다.
+
+## 5. 자동 실행 — 실제로 등록·검증함
+
+`~/Library/LaunchAgents/com.moa.research.plist` (StartInterval 3600초, RunAtLoad).
+
+실제 launchd 틱이 외장 SSD의 캠페인 상태를 읽어 다음을 반환하는 것을 확인했다.
+
+```json
+{"status": "DEV_EVALUATED", "run_id": "moa-unattended-20261020-pilot-01-r2b4", "model": "reloaded"}
+```
+
+### 5-1. 여기서 발견한 실제 함정
+
+launchd는 **외장 볼륨에 쓸 수 없다**(`Operation not permitted`). 처음엔 코드 78(EX_CONFIG)로 실패했다. 잠금 파일과 틱 로그를 내부(`~/Library/Application Support/MOA-Research`, `~/Library/Logs/moa-research`)로 옮겨 해결했다. 캠페인 상태·모델은 계속 외장에 둔다.
+
+## 6. 아직 검증하지 못한 것
+
+- 최종 blind 48문항 평가 — 후보·설정 봉인 후 1회만 해야 하므로 미실행
+- 학습률 1e-3 조건의 **완주** — 자원 보호로 21/120 updates에서 중단, 재개 미실행
+- 실제 통신문에 대한 품질 — 사람 정답 0건이므로 **주장 불가**
+- NAS 운영 배포 — 이번 범위 아님(운영 모델 교체 금지)
+- Codex 세션을 완전히 종료한 뒤의 틱 — launchd kickstart로는 확인했으나 장시간 무인 관찰은 미완료
+
+## 5. 운영 보호 확인
+
+- NAS 운영 DB·원문·승인 기록: 변경 없음
+- 운영 모델 레지스트리: 해시 불변(`491098af…`, `01227d3c…`)
+- 실제 통신문 자동승인·공개: 없음
+- 유료 AI·Muse·JEV 호출: 없음
+- 학습 이용 권한이 확인된 실제 통신문: 0건
+
+## 6. 재개·중지 방법
+
+```bash
+cd /Volumes/KIOXIA-2TB/Projects/Relocated-20261017/work/moa-push
+.venv312/bin/python -m moa.research_cli status  --root /Volumes/KIOXIA-2TB/Cache/MOA/unattended-20261020
+.venv312/bin/python -m moa.research_cli pause   --root /Volumes/KIOXIA-2TB/Cache/MOA/unattended-20261020
+.venv312/bin/python -m moa.research_cli resume  --root /Volumes/KIOXIA-2TB/Cache/MOA/unattended-20261020
+.venv312/bin/python -m moa.research_cli report  --root /Volumes/KIOXIA-2TB/Cache/MOA/unattended-20261020
+```
