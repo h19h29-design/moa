@@ -83,6 +83,9 @@ def advance(root=CAMPAIGN):
         return {'status': 'NOT_STARTED'}
     if (root / 'PAUSED').exists():
         return {'status': 'PAUSED_BY_OPERATOR'}
+    if (root/'binary-training/PLAN.json').exists():
+        from .research_binary_control import advance as binary_advance
+        return binary_advance(root)
     if (root/'lr-control/PLAN.json').exists():
         from .research_lr_control import advance as controlled_advance
         return controlled_advance(root)

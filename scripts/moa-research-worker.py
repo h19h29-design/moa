@@ -158,11 +158,24 @@ def execution_ancestor_hashes(job, folder):
     return result
 
 
-def queue(rows, policy, questions, with_gold=False):
+def queue(rows, policy, questions, with_gold=False, *, semantic_profile=None):
+    if semantic_profile not in (None, 'moa.binary-training.v1'):
+        raise ValueError('unknown semantic training profile')
     prepared = []
     for row in rows:
         state = policy.state_for({**row['state'], 'questions': list(row['questions'])})
         qs = policy.questions(list(row['questions']))
+        if semantic_profile == 'moa.binary-training.v1':
+            # The coordinator has independently checked the source inventory.
+            # Do not replace an existing three-choice job or relabel its gold.
+            if state['source_complete'] is not True or state['file_role'] != 'notice':
+                raise ValueError('binary training requires evidence-complete notice sections')
+            qs = {k: {'type':'choice', 'instructions':policy.CRITERIA[k] +
+                ' 제공된 증거만 사용하라. 근거 확보 검사를 통과한 구간의 내용과 관계만 비교하라.',
+                'criteria':{label:q['criteria'][label] for label in ('preserved','changed')}}
+                for k,q in qs.items()}
+            if any(k not in questions or questions[k] != q for k,q in qs.items()):
+                raise ValueError('published binary questions differ from worker definitions')
         if row['questions'] != qs:
             raise ValueError('question contract differs; do not silently replace it')
         entry = {'case_id': row['case_id'], 'state': state, 'questions': qs}
@@ -170,6 +183,10 @@ def queue(rows, policy, questions, with_gold=False):
             # Training labels stay on the worker only for the train split; they are
             # never part of `state`, so the model input carries no answer.
             entry['expected'] = dict(row['expected'])
+            if (semantic_profile == 'moa.binary-training.v1' and
+                    (set(entry['expected']) != set(qs) or
+                     any(label not in ('preserved','changed') for label in entry['expected'].values()))):
+                raise ValueError('binary training gold must have exactly two supported labels')
         prepared.append(entry)
     return prepared
 
@@ -234,7 +251,8 @@ def train(job_path, resume=False):
         raw_rows = sorted(balanced, key=lambda r: r['case_id'])
     elif sampling not in (None, 'none'):
         raise ValueError('unknown train sampling mode')
-    rows = queue(raw_rows, policy, job['questions'], with_gold=True)
+    rows = queue(raw_rows, policy, job['questions'], with_gold=True,
+                 semantic_profile=job.get('semantic_profile'))
     identity_sha = digest(canonical(job))
     data_sha = digest(canonical(rows))
     spec = importlib.util.spec_from_file_location('research_checkpoint_helpers', job['library'])
@@ -246,6 +264,9 @@ def train(job_path, resume=False):
                 'effective_laya_config':asdict(config),
                 'label_counts':dict(Counter(next(iter(row['expected'].values())) for row in rows)),
                 'installed_sha256':job['installed_sha256']}
+    if job.get('semantic_profile'):
+        contract.update(semantic_profile=job['semantic_profile'],
+                        option_labels=['preserved','changed'])
     contract_sha = digest(canonical(contract))
     with runtime.exclusive(ROOT / 'device.lock'):
         if not resource_allowed(runtime, job)[0]:
