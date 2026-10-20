@@ -205,6 +205,47 @@ def verify(root, plan, state):
                        (Path(root),plan['lineage_sha256']),(a.ROOT,plan['implementation_sha256'])]:
         if any(a.sha(base/n) != digest for n,digest in files.items()):
             raise ValueError('pinned implementation or input changed')
+    if state.get('candidate_allowance_sha256') and a.sha(folder/'CANDIDATE_ALLOWANCE.json') != state['candidate_allowance_sha256']:
+        raise ValueError('single-candidate allowance changed')
+
+
+def _allowance_record(root, plan):
+    if plan['run_id'] != RUN or plan['policy_snapshot']['max_candidate_runs_per_rolling_window'] != 8:
+        raise ValueError('only the existing eight-slot plan may receive one scoped extension')
+    return {'version':'moa.single-candidate-allowance.v1','run_id':RUN,
+            'plan_sha256':a.sha(Path(root)/'lr-control/PLAN.json'),
+            'base_candidate_limit':8,'additional_candidates':1,
+            'authorised_by':'explicit_user_one_extra_candidate_request_2026-10-20'}
+
+
+def execution_policy(root, plan):
+    """Only this fixed run may use slot nine; all time/resource caps stay intact."""
+    policy = copy.deepcopy(plan['policy_snapshot'])
+    path = Path(root)/'lr-control/CANDIDATE_ALLOWANCE.json'
+    if path.exists():
+        if research.canonical(rc._read_json(path)) != research.canonical(_allowance_record(root,plan)):
+            raise ValueError('invalid or broader single-candidate allowance')
+        policy['max_candidate_runs_per_rolling_window'] += 1
+    return policy
+
+
+def grant_candidate_slot(root=a.DEFAULT):
+    """Explicit operator action, never called by an automatic tick or training."""
+    root = Path(root);folder = root/'lr-control'
+    with (folder/'.controller.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        state = rc._read_json(folder/'STATE.json');plan = rc._read_json(folder/'PLAN.json')
+        verify(root,plan,state)
+        if (state['status'] not in ('WAITING_BUDGET','WAITING_RESOURCE') or state.get('training_issued') or
+                (root/'mini-worker/incoming'/RUN).exists() or (root/'mini-worker/research'/RUN).exists() or
+                any(e.get('candidate') == RUN for e in rc.BudgetLedger(root/'BUDGET.jsonl').entries())):
+            raise ValueError('cannot rearm or extend an issued/finished candidate')
+        record = _allowance_record(root,plan)
+        path = folder/'CANDIDATE_ALLOWANCE.json'
+        a.write_once(path,research.canonical(record))
+        state.update(candidate_allowance_sha256=a.sha(path),effective_candidate_limit=9)
+        rc._write_atomic(folder/'STATE.json',state)
+        return record
 
 
 def _resources(root):
@@ -273,6 +314,7 @@ def advance(root=a.DEFAULT, *, at=None):
             state.update(status=status,**values);rc._write_atomic(folder/'STATE.json',state);return state
         try:
             plan = rc._read_json(folder/'PLAN.json');verify(root,plan,state)
+            policy = execution_policy(root,plan)
             if _running(root) or _busy(root): return {'status':'OBSERVE_ONLY','run_id':RUN}
             trained_path = root/'mini-worker/research'/RUN/'TRAIN_RESULT.json'
             if not trained_path.exists():
@@ -283,13 +325,13 @@ def advance(root=a.DEFAULT, *, at=None):
                 ledger = rc.BudgetLedger(root/'BUDGET.jsonl')
                 if any(e.get('candidate') == RUN for e in ledger.entries()):
                     return save('RECONCILIATION_REQUIRED',reason='reservation exists without a recorded dispatch')
-                readiness = budget_readiness(ledger,plan['policy_snapshot'],at,
+                readiness = budget_readiness(ledger,policy,at,
                                              plan['configuration']['maximum_seconds'])
                 if not readiness['ready']: return save('WAITING_BUDGET',budget=readiness)
                 resources = _resources(root)
                 if not resources.get('train_allowed') or resources['available_memory_bytes'] < 5*2**30:
-                    return save('WAITING_RESOURCE')
-                ledger.reserve(now=at,policy=plan['policy_snapshot'],candidate=RUN,
+                    return save('WAITING_RESOURCE',budget=readiness)
+                ledger.reserve(now=at,policy=policy,candidate=RUN,
                                train_seconds=plan['configuration']['maximum_seconds'])
                 save('PUBLISHING',training_issued=True,training_reserved_at=at,
                      dispatched_at=at,resume_boundaries=[])
@@ -307,8 +349,8 @@ def advance(root=a.DEFAULT, *, at=None):
                         reservations[0]['train_seconds'] != plan['configuration']['maximum_seconds'] or
                         rc.parse_time(at).date() != rc.parse_time(reserved_at).date()):
                     return save('RECONCILIATION_REQUIRED',reason='resume would leave its original daily reservation')
-                usage = ledger.usage(now=at,policy=plan['policy_snapshot'])
-                if any(usage[key] > plan['policy_snapshot'][limit] for key,limit in (
+                usage = ledger.usage(now=at,policy=policy)
+                if any(usage[key] > policy[limit] for key,limit in (
                         ('rolling_seconds','max_train_time_rolling_seconds'),
                         ('today_seconds','max_train_time_per_calendar_day_seconds'),
                         ('candidates','max_candidate_runs_per_rolling_window'))):
@@ -378,11 +420,13 @@ def advance(root=a.DEFAULT, *, at=None):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['arm','advance','status'])
+    parser.add_argument('action',choices=['arm','advance','status','grant-candidate-slot'])
     parser.add_argument('--root',type=Path,default=a.DEFAULT)
     args = parser.parse_args()
-    value = arm(args.root) if args.action == 'arm' else advance(args.root) if args.action == 'advance' else \
-        rc._read_json(args.root/'lr-control/STATE.json')
+    if args.action == 'arm': value = arm(args.root)
+    elif args.action == 'advance': value = advance(args.root)
+    elif args.action == 'grant-candidate-slot': value = grant_candidate_slot(args.root)
+    else: value = rc._read_json(args.root/'lr-control/STATE.json')
     print(json.dumps(value,ensure_ascii=False))
 
 

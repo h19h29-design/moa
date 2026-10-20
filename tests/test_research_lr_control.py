@@ -326,3 +326,80 @@ def test_complete_control_is_compared_and_never_relaunched(tmp_path,monkeypatch)
     assert m.advance(tmp_path,at='2026-11-10T14:03:00+09:00')['status']=='COMPLETE'
     assert launches==['train','evaluate']
     assert len(rc.BudgetLedger(tmp_path/'BUDGET.jsonl').entries())==1
+
+
+def grant_extra(root):
+    m=api()
+    assert hasattr(m,'grant_candidate_slot'), 'explicit single-run candidate allowance required'
+    return m.grant_candidate_slot(root)
+
+
+def test_one_extra_candidate_is_scoped_and_preserves_all_other_limits(tmp_path,monkeypatch):
+    m=api();fixture(tmp_path);launches=[]
+    ledger=rc.BudgetLedger(tmp_path/'BUDGET.jsonl')
+    for i in range(8):
+        ledger.append({'at':'2026-10-20T13:00:00+09:00','candidate':'old-'+str(i),'train_seconds':100})
+    history=ledger.path.read_bytes();original=(tmp_path/'STATE.json').read_bytes()
+    monkeypatch.setattr(m,'_busy',lambda root:False)
+    monkeypatch.setattr(m,'_running',lambda root:bool(launches))
+    monkeypatch.setattr(m,'_resources',lambda root:{'train_allowed':True,'available_memory_bytes':6*2**30})
+    monkeypatch.setattr(m,'_launch',lambda root,action,resume=False:launches.append((action,resume)) or 1234)
+    assert m.advance(tmp_path,at='2026-10-20T21:00:00+09:00')['status']=='WAITING_BUDGET'
+    grant=grant_extra(tmp_path)
+    assert grant['run_id']==m.RUN
+    assert ledger.path.read_bytes()==history
+    assert (tmp_path/'STATE.json').read_bytes()==original
+    assert grant_extra(tmp_path)==grant
+    plan=rc._read_json(tmp_path/'lr-control/PLAN.json')
+    scoped=m.execution_policy(tmp_path,plan)
+    assert {k for k in scoped if scoped[k]!=policy()[k]}=={'max_candidate_runs_per_rolling_window'}
+    assert scoped['max_candidate_runs_per_rolling_window']==9
+    assert m.advance(tmp_path,at='2026-10-20T21:01:00+09:00')['status']=='TRAINING'
+    assert ledger.path.read_bytes().startswith(history)
+    assert ledger.entries()[-1]['train_seconds']==1800 and len(ledger.entries())==9
+    assert rc.BudgetLedger(ledger.path).usage(now='2026-10-20T21:01:00+09:00',policy=policy())['remaining_candidates']==0
+    assert m.advance(tmp_path,at='2026-10-20T21:02:00+09:00')['status']=='OBSERVE_ONLY'
+    assert launches==[('train',False)] and len(ledger.entries())==9
+    with pytest.raises(ValueError): grant_extra(tmp_path)
+    rc._write_atomic(tmp_path/'mini-worker/research'/m.RUN/'TRAIN_RESULT.json',
+                     {'stop_reason':'resource_guard','sha256':{'training-state.pt':'b'*64}})
+    monkeypatch.setattr(m,'_training_result',lambda *args:None)
+    monkeypatch.setattr(m,'_running',lambda root:False)
+    assert m.advance(tmp_path,at='2026-10-20T21:03:00+09:00')['status']=='TRAINING'
+    assert launches==[('train',False),('train',True)] and len(ledger.entries())==9
+
+
+@pytest.mark.parametrize('cause,expected',[
+    ('time','WAITING_BUDGET'),('memory','WAITING_RESOURCE'),('active_user','WAITING_RESOURCE'),
+])
+def test_extra_slot_never_relaxes_time_memory_or_idle_guards(tmp_path,monkeypatch,cause,expected):
+    m=api();fixture(tmp_path)
+    ledger=rc.BudgetLedger(tmp_path/'BUDGET.jsonl')
+    for i in range(8):
+        ledger.append({'at':'2026-10-20T13:00:00+09:00','candidate':'old-'+str(i),
+                       'train_seconds':1250 if cause=='time' else 100})
+    before=ledger.path.read_bytes();grant_extra(tmp_path)
+    monkeypatch.setattr(m,'_busy',lambda root:False)
+    monkeypatch.setattr(m,'_running',lambda root:False)
+    monkeypatch.setattr(m,'_resources',lambda root:{'train_allowed':cause!='active_user',
+        'available_memory_bytes':4*2**30 if cause=='memory' else 6*2**30})
+    def forbidden(*args,**kwargs): pytest.fail('unsafe training launch')
+    monkeypatch.setattr(m,'_launch',forbidden)
+    outcome=m.advance(tmp_path,at='2026-10-20T21:00:00+09:00')
+    assert outcome['status']==expected
+    assert outcome['budget']['ready'] is (cause!='time')
+    assert ledger.path.read_bytes()==before
+
+
+@pytest.mark.parametrize('mutation',['other_run','changed_plan','extra_two','more_time'])
+def test_extra_slot_refuses_another_job_or_any_broader_permission(tmp_path,mutation):
+    m=api();fixture(tmp_path);grant_extra(tmp_path)
+    path=tmp_path/'lr-control/CANDIDATE_ALLOWANCE.json'
+    grant=rc._read_json(path)
+    if mutation=='other_run': grant['run_id']='another-job'
+    elif mutation=='changed_plan': grant['plan_sha256']='0'*64
+    elif mutation=='extra_two': grant['additional_candidates']=2
+    else: grant['maximum_seconds']=2700
+    rc._write_atomic(path,grant)
+    plan=rc._read_json(tmp_path/'lr-control/PLAN.json')
+    with pytest.raises(ValueError): m.execution_policy(tmp_path,plan)
