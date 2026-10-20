@@ -1,4 +1,4 @@
-"""A single binary candidate must use remaining standard capacity, never slot nine."""
+"""A binary candidate requires its own explicit allowance beyond standard capacity."""
 import copy
 import hashlib
 import importlib
@@ -221,3 +221,82 @@ def test_invalid_accumulated_evaluation_time_cannot_produce_a_success(seconds,tm
         request_sha256=plan['input_sha256']['BINARY_REQUEST.json']))
     assert m.advance(tmp_path,at='2026-10-28T12:03:00+09:00')['status']=='RECONCILIATION_REQUIRED'
     assert launches==[('train',False)]
+
+
+def previous_consumed_allowance(root):
+    """Independent historical ninth-slot receipt; no model or training is run."""
+    from moa import research_lr_control as old
+    folder=root/'lr-control'
+    rc._write_atomic(folder/'PLAN.json',dict(run_id=old.RUN,
+        policy_snapshot={'max_candidate_runs_per_rolling_window':8}))
+    receipt=dict(version='moa.single-candidate-allowance.v1',run_id=old.RUN,
+        plan_sha256=a.sha(folder/'PLAN.json'),base_candidate_limit=8,additional_candidates=1,
+        authorised_by='explicit_user_one_extra_candidate_request_2026-10-20')
+    rc._write_atomic(folder/'CANDIDATE_ALLOWANCE.json',receipt)
+    rc._write_atomic(folder/'STATE.json',dict(status='COMPLETE',
+        candidate_allowance_sha256=a.sha(folder/'CANDIDATE_ALLOWANCE.json')))
+    ledger=rc.BudgetLedger(root/'BUDGET.jsonl')
+    for i in range(9):
+        ledger.append(dict(at='2026-10-20T13:00:00+09:00',
+            candidate=old.RUN if i==8 else 'used-'+str(i),train_seconds=100))
+    return ledger
+
+
+def grant_binary_slot(root):
+    m=api()
+    assert hasattr(m,'grant_candidate_slot'), 'explicit binary-only extra candidate permission required'
+    return m.grant_candidate_slot(root)
+
+
+def test_explicit_binary_extra_slot_charges_only_this_candidate_once(tmp_path,monkeypatch):
+    m=api();plan=fixture(tmp_path);ledger=previous_consumed_allowance(tmp_path)
+    launches=[];runtime(monkeypatch,m,launches)
+    history=ledger.path.read_bytes();snapshot=(tmp_path/'STATE.json').read_bytes()
+    assert m.advance(tmp_path,at='2026-10-21T08:00:00+09:00')['status']=='WAITING_BUDGET'
+    receipt=grant_binary_slot(tmp_path)
+    assert receipt['run_id']==m.RUN and receipt['additional_candidates']==1
+    assert grant_binary_slot(tmp_path)==receipt
+    scoped=m.execution_policy(tmp_path,plan)
+    assert {k for k in scoped if scoped[k]!=plan['policy_snapshot'][k]}=={'max_candidate_runs_per_rolling_window'}
+    assert scoped['max_candidate_runs_per_rolling_window']==10
+    assert ledger.path.read_bytes()==history and (tmp_path/'STATE.json').read_bytes()==snapshot
+    assert m.advance(tmp_path,at='2026-10-21T08:01:00+09:00')['status']=='TRAINING'
+    assert ledger.path.read_bytes().startswith(history) and len(ledger.entries())==10
+    assert ledger.entries()[-1]['candidate']==m.RUN and ledger.entries()[-1]['train_seconds']==1800
+    assert launches==[('train',False)]
+    with pytest.raises(ValueError):grant_binary_slot(tmp_path)
+    saved_training(tmp_path,plan,reason='resource_guard')
+    assert m.advance(tmp_path,at='2026-10-21T08:02:00+09:00')['status']=='TRAINING'
+    assert launches==[('train',False),('train',True)] and len(ledger.entries())==10
+
+
+@pytest.mark.parametrize('cause,expected',[
+    ('time','WAITING_BUDGET'),('memory','WAITING_RESOURCE'),('active_user','WAITING_RESOURCE')])
+def test_binary_extra_slot_preserves_time_memory_and_idle_guards(tmp_path,monkeypatch,cause,expected):
+    m=api();fixture(tmp_path);ledger=previous_consumed_allowance(tmp_path)
+    if cause=='time':ledger.append(dict(at='2026-10-21T07:00:00+09:00',
+        candidate='used-0',train_seconds=10000))
+    history=ledger.path.read_bytes();grant_binary_slot(tmp_path)
+    launches=[];runtime(monkeypatch,m,launches)
+    monkeypatch.setattr(m,'_resources',lambda root:dict(train_allowed=cause!='active_user',
+        available_memory_bytes=(4 if cause=='memory' else 6)*2**30))
+    out=m.advance(tmp_path,at='2026-10-21T08:00:00+09:00')
+    assert out['status']==expected and not launches and ledger.path.read_bytes()==history
+
+
+@pytest.mark.parametrize('mutation',['other_run','extra_two','more_time','previous_receipt','unbound'])
+def test_binary_allowance_rejects_broader_or_unbound_permission(tmp_path,monkeypatch,mutation):
+    m=api();fixture(tmp_path);previous_consumed_allowance(tmp_path);grant_binary_slot(tmp_path)
+    folder=tmp_path/m.FOLDER;path=folder/'CANDIDATE_ALLOWANCE.json';receipt=rc._read_json(path)
+    if mutation=='other_run':receipt['run_id']='another-candidate'
+    elif mutation=='extra_two':receipt['additional_candidates']=2
+    elif mutation=='more_time':receipt['maximum_seconds']=2700
+    elif mutation=='previous_receipt':
+        rc._write_atomic(tmp_path/'lr-control/CANDIDATE_ALLOWANCE.json',dict(additional_candidates=9))
+    else:
+        state=rc._read_json(folder/'STATE.json');state.pop('candidate_allowance_sha256')
+        rc._write_atomic(folder/'STATE.json',state)
+    if mutation not in ('previous_receipt','unbound'):rc._write_atomic(path,receipt)
+    launches=[];runtime(monkeypatch,m,launches)
+    assert m.advance(tmp_path,at='2026-10-21T08:00:00+09:00')['status']=='RECONCILIATION_REQUIRED'
+    assert not launches

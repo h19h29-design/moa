@@ -1,8 +1,9 @@
 """One evidence-gated, genuinely binary synthetic training candidate.
 
 The old ninth-slot permission belongs to the completed LR experiment, not this
-run. Keep the original eight-slot ledger, time/resource guards and models. The
-derivative train/dev is exposed development data, never a new blind test.
+run. A separate explicit operator grant can authorise this candidate once;
+the original ledger, time/resource guards and models remain unchanged.
+The derivative train/dev is exposed development data, never a new blind test.
 """
 from __future__ import annotations
 
@@ -231,6 +232,61 @@ def verify(root, plan, state):
                 r['model_loaded'] is not False or r['option_labels'] != ['preserved','changed'] or
                 r['skipped'] != 0 or r['truncated'] != 0):
             raise ValueError('actual two-choice input preflight did not pass')
+    allowance = folder/'CANDIDATE_ALLOWANCE.json'
+    if bool(state.get('candidate_allowance_sha256')) != allowance.exists():
+        raise ValueError('binary allowance must be bound to its controller state')
+    if allowance.exists():
+        if a.sha(allowance) != state['candidate_allowance_sha256']:
+            raise ValueError('binary candidate allowance changed')
+        execution_policy(root,plan)
+
+
+def _allowance_record(root, plan):
+    root = Path(root); old = root/'lr-control'
+    prior = old/'CANDIDATE_ALLOWANCE.json'
+    old_plan = _read(old/'PLAN.json'); old_state = _read(old/'STATE.json')
+    if (plan['run_id'] != RUN or plan['policy_snapshot']['max_candidate_runs_per_rolling_window'] != 8 or
+            old_state['status'] != 'COMPLETE' or
+            a.sha(prior) != old_state.get('candidate_allowance_sha256') or
+            _read(prior) != previous._allowance_record(root,old_plan) or
+            len([e for e in rc.BudgetLedger(root/'BUDGET.jsonl').entries()
+                 if e.get('candidate') == previous.RUN]) != 1):
+        raise ValueError('the prior consumed allowance must remain independently accounted for')
+    return dict(version='moa.binary-candidate-allowance.v1',run_id=RUN,
+        plan_sha256=a.sha(root/FOLDER/'PLAN.json'),base_candidate_limit=8,
+        prior_consumed_extra_candidates=1,prior_allowance_sha256=a.sha(prior),
+        additional_candidates=1,effective_candidate_limit=10,
+        authorised_by='explicit_user_one_extra_binary_candidate_request_2026-10-21')
+
+
+def execution_policy(root, plan):
+    """One binary-only slot, beyond the separately spent LR slot; no other change."""
+    policy = dict(plan['policy_snapshot'])
+    path = Path(root)/FOLDER/'CANDIDATE_ALLOWANCE.json'
+    if path.exists():
+        if _read(path) != _allowance_record(root,plan):
+            raise ValueError('invalid or broader binary candidate allowance')
+        policy['max_candidate_runs_per_rolling_window'] = 10
+    return policy
+
+
+def grant_candidate_slot(root=a.DEFAULT):
+    """Explicit operator action only, never invoked by advance or the scheduler."""
+    root = Path(root); folder = root/FOLDER
+    with (folder/'.controller.lock').open('a') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        state = _read(folder/'STATE.json'); plan = _read(folder/'PLAN.json')
+        verify(root,plan,state)
+        if (state['status'] not in ('WAITING_BUDGET','WAITING_RESOURCE') or state.get('training_issued') or
+                (root/'mini-worker/incoming'/RUN).exists() or (root/'mini-worker/research'/RUN).exists() or
+                any(e.get('candidate') == RUN for e in rc.BudgetLedger(root/'BUDGET.jsonl').entries())):
+            raise ValueError('cannot rearm or extend an issued/finished binary candidate')
+        record = _allowance_record(root,plan)
+        path = folder/'CANDIDATE_ALLOWANCE.json'
+        a.write_once(path,research.canonical(record))
+        state.update(candidate_allowance_sha256=a.sha(path),effective_candidate_limit=10)
+        rc._write_atomic(folder/'STATE.json',state)
+        return record
 
 
 def _running(root):
@@ -286,7 +342,7 @@ def advance(root=a.DEFAULT, *, at=None):
             plan = _read(folder/'PLAN.json');verify(root,plan,state)
             if not state.get('input_preflight_sha256'):return save('WAITING_INPUT_PREFLIGHT')
             if _running(root) or _busy(root):return {'status':'OBSERVE_ONLY','run_id':RUN}
-            policy = plan['policy_snapshot']  # Never import the old ninth-slot allowance.
+            policy = execution_policy(root,plan)  # A new grant never reuses the old permission.
             ledger = rc.BudgetLedger(root/'BUDGET.jsonl')
             path = root/'mini-worker/research'/RUN/'TRAIN_RESULT.json'
             if not path.exists():
@@ -379,9 +435,11 @@ def advance(root=a.DEFAULT, *, at=None):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['arm','advance','status'])
+    parser.add_argument('action',choices=['arm','advance','status','grant-candidate-slot'])
     parser.add_argument('--root',type=Path,default=a.DEFAULT);args = parser.parse_args()
-    value = arm(args.root) if args.action=='arm' else advance(args.root) if args.action=='advance' else _read(args.root/FOLDER/'STATE.json')
+    value = (arm(args.root) if args.action=='arm' else advance(args.root) if args.action=='advance'
+        else grant_candidate_slot(args.root) if args.action=='grant-candidate-slot'
+        else _read(args.root/FOLDER/'STATE.json'))
     print(json.dumps(value,ensure_ascii=False))
 
 
