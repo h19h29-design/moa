@@ -83,6 +83,9 @@ def advance(root=CAMPAIGN):
         return {'status': 'NOT_STARTED'}
     if (root / 'PAUSED').exists():
         return {'status': 'PAUSED_BY_OPERATOR'}
+    if (root/'lr-control/PLAN.json').exists():
+        from .research_lr_control import advance as controlled_advance
+        return controlled_advance(root)
     state = json.loads(state_path.read_bytes())
     if state.get('alignment_enabled'):
         from .research_alignment import advance as alignment_advance

@@ -54,6 +54,9 @@ def summarize_root(root):
     binary_state = root/'binary/STATE.json'
     if binary_state.exists():
         state['binary_research'] = json.loads(binary_state.read_bytes())
+    lr_state = root/'lr-control/STATE.json'
+    if lr_state.exists():
+        state['lr_control'] = json.loads(lr_state.read_bytes())
     state.setdefault('operational_ready', False)
     state.setdefault('human_approvals', 0)
     return state
