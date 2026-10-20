@@ -67,7 +67,6 @@ def test_separate_dependent_noun_copula_retains_its_entire_adnominal_prefix(pref
     ('선택해야 할 것입니다.', '선택할 것이에요.'),
     ('참가할 것입니다.', '참가한 것이에요.'),
     ('선택할 것입니다.', '선택할 것예요.'),
-    ('이것입니다.', '이것이에요.'),
     ('안내문을 죽입니다.', '안내문을 죽이에요.'),
     ('성장할 수 있을 것입니다.', '성장할 수 있을것이에요.'),
 ])
@@ -93,11 +92,9 @@ def test_failed_literal_quote_proof_cannot_fall_back_to_fuzzy_clause_tokens(sour
     ('참가 대상은 보호자와 학생입니다.', '참가 대상은 보호자와 학생이에요.'),
 ])
 @pytest.mark.parametrize('field', ['facts', 'conditions', 'notes'])
-def test_unproven_nominal_copula_keeps_strict_comparison(source, dom, field):
-    # Final consonants cannot prove whether ...입니다 is a copula or a verb.
-    # These valid paraphrases remain an explicit unsupported false-positive
-    # boundary until independent lexical/syntactic evidence is available.
-    assert compare({field: [source]}, {field: [dom]})['quality_label'] == 'changed'
+def test_lexically_proven_nominal_copula_retains_its_complete_prefix(source, dom, field):
+    # A supported noun, not just final-consonant agreement, proves the copula.
+    assert compare({field: [source]}, {field: [dom]})['quality_label'] == 'preserved'
 
 
 @pytest.mark.parametrize('source,dom', [

@@ -12,7 +12,7 @@ import re
 
 from .verification import content_tokens
 
-VERSION = 'moa.independent-clause.v15'
+VERSION = 'moa.independent-clause.v16'
 # Do not enumerate Korean endings after former/latter: an unseen ending can
 # still bind another field's order. Without a lexical parser, compounds such
 # as '전자공학' conservatively remain strict too. A left lexical boundary
@@ -64,6 +64,46 @@ _CONDITIONAL = re.compile(r'^(.{2,45}?(?:면|경우에는|경우에|경우))\s+\
 _SUBJECT = re.compile(r'^([가-힣0-9 ]{2,35}?)(?:은|는|이|가)\s+\S.+(?:합니다|됩니다|바랍니다)\.$')
 _QUOTE_PAIRS = {'"': '"', "'": "'", '“': '”', '‘': '’', '「': '」', '『': '』'}
 _QUOTE_CLOSE = set(_QUOTE_PAIRS.values())
+# Lexical evidence for a terminal NOMINAL predicate, not a suffix guess. Keep
+# this small, explicit and versioned. Entire tokens only: arbitrary compounds,
+# names and possible verb stems are not inferred from a noun-looking suffix.
+# These are notice vocabulary classes, not source-document/example lookups.
+_COPULA_NOUNS = frozenset('''
+학생 초등학생 중학생 고등학생 학부모 보호자 교사 선생님 참가자 신청자 대상자
+대상 준비물 필기구 교과서 안내문 신청서 동의서 서류 문구 내용 사항 방법
+일정 기간 시간 기한 예정 계획 행사 활동 체험 수업 교육 프로그램 모임
+장소 학교 교실 도서관 강당 운동장 온라인 오프라인 대면 비대면
+필수 선택 가능 불가 무료 유료 예외 조건 순서 기준 결과 이유
+가정통신문 안내 부탁 당부 바람 생각 마음 의미 목적 기회 경험 성장 보람 계기
+도움 기대 행복 기쁨 희망 능력 책임 공동체 진로 전공 학과 꿈 노력 역할
+실습 탐구 실험 관찰 과제 평가 검사 시험 중간고사 기말고사 성적 학년 학기
+안전 건강 보건 생활 교육과정 방과후 급식 방학 휴업 교복 원칙 규칙 약속
+유의점 주의점 변경 취소 접수 신청 제출 납부 입금 때 차례 날 날짜
+월요일 화요일 수요일 목요일 금요일 토요일 일요일
+이것 그것 저것 것
+'''.split())
+_COPULA_QUANTITY = re.compile(
+    r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[백천만억])?\s*'
+    r'(년|월|일|시|분|초|원|명|인|개|과목|가지|회|번|장|부|권|학년|학기|주|개월|시간|kg|g|cm|mm|m|L)$')
+_UNIT_CONSONANT = {'kg': True, 'g': True, 'cm': False, 'mm': False, 'm': False, 'L': False}
+
+
+def _nominal_copula_consonant(prefix):
+    """Prove this text's noun/quantity and independently derive its allomorph.
+
+    None means unknown, including bare digits, unknown Latin pronunciation,
+    attached particles, and verb stems. No opposite-side input is consulted.
+    """
+    token = prefix.rsplit(' ', 1)[-1]
+    if token in _COPULA_NOUNS:
+        return (ord(token[-1]) - 0xac00) % 28 != 0
+    quantity = _COPULA_QUANTITY.search(prefix)
+    if quantity and (quantity.start() == 0 or prefix[quantity.start()-1] == ' '):
+        unit = quantity[1]
+        if unit in _UNIT_CONSONANT:
+            return _UNIT_CONSONANT[unit]
+        return (ord(unit[-1]) - 0xac00) % 28 != 0
+    return None
 
 
 def _closed_literal_prefix(prefix):
@@ -111,7 +151,8 @@ def normalize_ordered_presentation(text):
     # Neither a suffix nor final-consonant agreement proves a nominal copula.
     # A separated dependent noun 것 following an adnominal ㄴ/ㄹ/는 has
     # independent syntactic evidence. Preserve that entire antecedent; do not
-    # generalize to arbitrary ...입니다/이에요 suffixes or lexical nouns.
+    # generalize to arbitrary ...입니다/이에요 suffixes. Ordinary nouns need
+    # the separate explicit lexical/quantity evidence below.
     for ending in (' 것입니다.', ' 것이에요.'):
         if value.endswith(ending):
             prefix = value[:-len(ending)]
@@ -119,6 +160,16 @@ def normalize_ordered_presentation(text):
                     ((ord(prefix[-1]) - 0xac00) % 28 in (4, 8) or prefix.endswith('는')) and
                     _closed_literal_prefix(prefix)):
                 return prefix + ' 것입니다.', ['ordered_dependent_noun_copula']
+    for ending in ('입니다.', '이에요.', '예요.'):
+        if value.endswith(ending):
+            prefix = value[:-len(ending)]
+            # Whitespace before the ending is not evidence of a valid copula.
+            if not prefix or prefix[-1].isspace() or not _closed_literal_prefix(prefix):
+                continue
+            consonant = _nominal_copula_consonant(prefix)
+            if consonant is not None and ending in (
+                    '입니다.', '이에요.' if consonant else '예요.'):
+                return prefix + '입니다.', ['ordered_lexical_nominal_copula']
     # Unknown copular paraphrases deliberately retain strict comparison.
     return value, []
 
