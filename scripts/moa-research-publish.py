@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from moa import research_runner as rr  # noqa: E402
+from moa import r2_research as research  # noqa: E402
 from moa.worker_handoff import questions  # noqa: E402
 
 CAMPAIGN = Path('/Volumes/KIOXIA-2TB/Cache/MOA/unattended-20261020')
@@ -48,10 +49,29 @@ def file_hash(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def configuration_for(args, train_rows):
+    configuration = {'epochs': args.epochs, 'maximum_updates': args.max_updates,
+                     'planned_updates': args.max_updates, 'maximum_seconds': args.max_seconds,
+                     'micro_batch': 1, 'grad_accum': 8, 'freeze_encoder': True,
+                     'loss': args.loss, 'head_lr': args.head_lr, 'min_lr': 1e-06,
+                     'weight_decay': 0.01, 'grad_clip': 1.0, 'seed': args.seed,
+                     'max_len': 1024, 'head_max_len': 256, 'amp': False,
+                     'gradient_checkpointing': False, 'shuffle_options': ['choice']}
+    count = research.training_item_count(train_rows,
+        'balanced_oversample' if args.balanced else None)
+    return research.training_plan(configuration,count)['configuration']
+
+
 def run(args):
     root = Path(__file__).resolve().parents[1]
     stage = CAMPAIGN / 'stage' / args.run_id
-    stage.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if stage.exists():
+        raise FileExistsError('existing research stage is immutable; reconcile, do not republish')
+    # Resolve unsupported settings before creating or transferring a job.
+    train_rows = [json.loads(line) for line in (CAMPAIGN/'data/train.jsonl').read_bytes().splitlines()
+                  if line.strip()]
+    configuration = configuration_for(args,train_rows)
+    stage.mkdir(parents=True, exist_ok=False, mode=0o700)
     bundle_sha = {}
     for split in ('train', 'dev'):
         name = '%s-000.jsonl' % split
@@ -65,13 +85,6 @@ def run(args):
     # never depends on files left over from an earlier evidence folder.
     (stage / 'moa-research-worker.py').write_bytes((root / 'scripts/moa-research-worker.py').read_bytes())
     (stage / 'r2_research.py').write_bytes((root / 'moa/r2_research.py').read_bytes())
-    configuration = {'epochs': args.epochs, 'maximum_updates': args.max_updates,
-                     'planned_updates': args.max_updates, 'maximum_seconds': args.max_seconds,
-                     'micro_batch': 1, 'grad_accum': 8, 'freeze_encoder': True,
-                     'loss': args.loss, 'head_lr': args.head_lr, 'min_lr': 1e-06,
-                     'weight_decay': 0.01, 'grad_clip': 1.0, 'seed': args.seed,
-                     'max_len': 1024, 'head_max_len': 256, 'amp': False,
-                     'gradient_checkpointing': False, 'shuffle_options': ['choice']}
     job = rr.job_payload(run_id=args.run_id, bundle='incoming/' + args.run_id,
                          bundle_sha256=bundle_sha, configuration=configuration,
                          parent=PARENT, parent_files=PARENT_FILES,

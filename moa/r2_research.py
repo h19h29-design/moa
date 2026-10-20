@@ -8,9 +8,11 @@ snapshots only; no network, DB or subprocess operations live here.
 from __future__ import annotations
 
 import contextlib
+import copy
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 from collections import Counter
@@ -18,6 +20,72 @@ from pathlib import Path
 
 LABELS = ('preserved', 'changed', 'insufficient')
 CAPS = {'s1': (40, 600), 'r2a': (400, 2700)}
+
+
+def training_item_count(rows, sampling=None):
+    """Count the existing sampler's items without duplicating data to train."""
+    if not rows or any(len(row.get('expected', {})) != 1 for row in rows):
+        raise ValueError('one labelled question per research row required')
+    if sampling in (None, 'none'):
+        return len(rows)
+    if sampling != 'balanced_oversample':
+        raise ValueError('unknown research sampler')
+    counts = Counter(next(iter(row['expected'].values())) for row in rows)
+    return max(counts.values()) * len(counts)
+
+
+def training_plan(configuration, item_count):
+    """Resolve a fixed runner's schedule, never an execution permission.
+
+    The runner implements FP32 soft-CE, one item per microbatch, frozen encoder,
+    sequential layout and explicitly shuffled choice options. Reject knobs it
+    would otherwise silently ignore. Only the scheduler horizon is derived;
+    time, update, epoch and resource budgets are never increased.
+    """
+    required = {'epochs','maximum_updates','planned_updates','maximum_seconds',
+                'micro_batch','grad_accum','freeze_encoder','loss','head_lr','min_lr',
+                'weight_decay','grad_clip','seed','max_len','head_max_len','amp',
+                'gradient_checkpointing','shuffle_options'}
+    if set(configuration) != required or type(item_count) is not int or item_count < 1:
+        raise ValueError('explicit supported research training configuration required')
+    cfg = copy.deepcopy(configuration)
+    integer_fields = ('epochs','maximum_updates','planned_updates','maximum_seconds',
+                      'micro_batch','grad_accum','seed','max_len','head_max_len')
+    if any(type(cfg[k]) is not int or cfg[k] < (0 if k == 'seed' else 1) for k in integer_fields):
+        raise ValueError('positive integer training limits required')
+    if (cfg['maximum_updates'] > 400 or not 30 <= cfg['maximum_seconds'] <= 2700 or
+            cfg['micro_batch'] != 1 or cfg['freeze_encoder'] is not True or
+            cfg['amp'] is not False or cfg['gradient_checkpointing'] is not False or
+            cfg['loss'] != 'soft-ce' or cfg['max_len'] != 1024 or cfg['head_max_len'] != 256 or
+            cfg['shuffle_options'] not in (['choice'], ('choice',))):
+        raise ValueError('unsupported fixed research runner setting')
+    for key in ('head_lr','min_lr','weight_decay','grad_clip'):
+        if (type(cfg[key]) not in (int,float) or not math.isfinite(cfg[key]) or
+                cfg[key] < 0 or key != 'weight_decay' and cfg[key] == 0):
+            raise ValueError('finite supported training rate required')
+    if cfg['min_lr'] > cfg['head_lr']:
+        raise ValueError('minimum learning rate exceeds initial learning rate')
+    windows = (item_count+cfg['grad_accum']-1)//cfg['grad_accum']
+    updates = min(cfg['maximum_updates'], windows*cfg['epochs'])
+    cfg['planned_updates'] = updates
+    return {'version':'moa.fixed-training-plan.v1','configuration':cfg,
+            'items_per_epoch':item_count,'windows_per_epoch':windows,'optimizer_updates':updates,
+            'training_authorized':False}
+
+
+def checkpoint_training_config(model_cfg, *, run_id, updates, cursor, contract_sha256):
+    """Record this run, retaining rather than relabelling the parent's metadata."""
+    if (not isinstance(run_id,str) or not run_id or type(updates) is not int or updates < 0 or
+            not re.fullmatch(r'[0-9a-f]{64}',contract_sha256)):
+        raise ValueError('observed research checkpoint identity required')
+    result = copy.deepcopy(model_cfg)
+    if 'training' in result:
+        result['parent_training_metadata'] = result['training']
+    result['training'] = {'scope':'unattended_synthetic_research','run_id':run_id,
+                          'updates':updates,'epochs_completed':cursor['epoch'],
+                          'cursor':dict(cursor),'training_contract_sha256':contract_sha256,
+                          'encoder_frozen':True,'operational_promotion':False}
+    return result
 
 
 def canonical(value):

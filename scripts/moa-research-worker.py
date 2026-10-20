@@ -8,6 +8,8 @@ database, network call or arbitrary shell is reachable from here.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from dataclasses import asdict
 import gc
 import hashlib
 import importlib.util
@@ -190,6 +192,17 @@ def training_headroom(runtime, job, torch):
     return resource_allowed(runtime, job)
 
 
+def training_configuration(cfg, item_count, helper, tr):
+    """Enforce the published plan before a model is loaded or optimized."""
+    plan = helper.training_plan(cfg,item_count)
+    if cfg['planned_updates'] != plan['optimizer_updates']:
+        raise ValueError('scheduler horizon differs from actual capped optimizer windows')
+    effective = tr.TrainConfig(**{k:v for k,v in cfg.items() if k in tr.TrainConfig.__dataclass_fields__},
+                               calib_frac=0,calib_max=0,log_every=10)
+    effective.validate()
+    return effective, plan
+
+
 def train(job_path, resume=False):
     import torch
     job, rows_by_split, parent, ml, policy, runtime, tr = context(job_path)
@@ -224,10 +237,26 @@ def train(job_path, resume=False):
     rows = queue(raw_rows, policy, job['questions'], with_gold=True)
     identity_sha = digest(canonical(job))
     data_sha = digest(canonical(rows))
+    spec = importlib.util.spec_from_file_location('research_checkpoint_helpers', job['library'])
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    config, plan = training_configuration(cfg,len(rows),helper,tr)
+    contract = {'version':'moa.executed-training-contract.v1','run_id':job['run_id'],
+                'job_sha256':identity_sha,'data_sha256':data_sha,'plan':plan,
+                'effective_laya_config':asdict(config),
+                'label_counts':dict(Counter(next(iter(row['expected'].values())) for row in rows)),
+                'installed_sha256':job['installed_sha256']}
+    contract_sha = digest(canonical(contract))
     with runtime.exclusive(ROOT / 'device.lock'):
         if not resource_allowed(runtime, job)[0]:
             return {'status': 'parked_resources', 'resources': runtime.resources()}
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        contract_path = folder/'TRAINING_CONTRACT.json'
+        if contract_path.exists():
+            if contract_path.read_bytes() != canonical(contract):
+                raise ValueError('saved effective training contract changed')
+        else:
+            atomic_json(contract_path,contract)
         started = time.monotonic()
         model, tok, model_cfg = tr.load_checkpoint(str(parent))
         model.encoder.config.reference_compile = False
@@ -238,9 +267,6 @@ def train(job_path, resume=False):
         named = {n: p for n, p in model.named_parameters() if p.requires_grad}
         if any(n.startswith('encoder.') for n in named):
             raise ValueError('encoder must stay frozen')
-        config = tr.TrainConfig(**{k: v for k, v in cfg.items() if k in tr.TrainConfig.__dataclass_fields__},
-                                calib_frac=0, calib_max=0, log_every=10)
-        config.validate()
         for row in rows:
             ml.preflight(tok, row['state'], row['questions'])
         items, skipped = tr.items_from_rows(tok, rows, 1024, 256)
@@ -251,7 +277,7 @@ def train(job_path, resume=False):
         optimizer = torch.optim.AdamW([{'params': list(named.values()), 'lr': config.head_lr}],
                                       weight_decay=config.weight_decay)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=max(1, cfg['planned_updates']), eta_min=config.min_lr)
+            optimizer, T_max=plan['optimizer_updates'], eta_min=config.min_lr)
         torch.manual_seed(config.seed)
         order_rng = random.Random(config.seed)
         before = parameter_hash(model)
@@ -292,9 +318,6 @@ def train(job_path, resume=False):
         stop = threading.Event()
         previous = {sig: signal.signal(sig, lambda *_: stop.set())
                     for sig in (signal.SIGTERM, signal.SIGINT)}
-        spec = importlib.util.spec_from_file_location('research_checkpoint_helpers', job['library'])
-        helper = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(helper)
 
         def save(tag, full=False):
             revision = '-r'+str(job['execution_revision']) if job.get('execution_revision') else ''
@@ -306,9 +329,11 @@ def train(job_path, resume=False):
             # Interim optimizer boundaries need only the head: the frozen parent
             # remains hash-pinned. Preserve every existing model and boundary.
             if full:
-                helper.save_checkpoint_cpu_first(model, tok,
-                    dict(model_cfg, max_len=1024, head_max_len=256,
-                         temperature=[1, 1, 1], temperature_by_options={}), destination)
+                exported = helper.checkpoint_training_config(
+                    dict(model_cfg,max_len=1024,head_max_len=256,
+                         temperature=[1,1,1],temperature_by_options={}),
+                    run_id=job['run_id'],updates=steps,cursor=cursor,contract_sha256=contract_sha)
+                helper.save_checkpoint_cpu_first(model,tok,exported,destination)
             state = {'head': {n: v.detach().cpu().clone() for n, v in model.state_dict().items()
                               if not n.startswith('encoder.')},
                      'optimizer': optimizer.state_dict(), 'scheduler': scheduler.state_dict(),
@@ -316,6 +341,7 @@ def train(job_path, resume=False):
                      'python_rng': random.getstate(), 'option_rng': order_rng.getstate(),
                      'run_id': job['run_id'], 'data_sha256': data_sha,
                      'job_sha256': identity_sha,
+                     'training_contract_sha256':contract_sha,
                      'cumulative_seconds': previous_seconds + time.monotonic() - started,
                      'history': history,
                      'torch_rng': torch.get_rng_state(), 'mps_rng': torch.mps.get_rng_state(),
@@ -441,6 +467,7 @@ def train(job_path, resume=False):
                   'session_seconds': time.monotonic() - started, 'history': history[-5:],
                   'weights_changed': after != before, 'stop_reason': reason,
                   'data_sha256': data_sha, 'job_sha256': identity_sha,
+                  'training_contract_sha256':contract_sha,
                   'resume_from_updates': first_step, 'resume_from_sha256': resume_sha,
                   'initial_head_sha256': before, 'final_head_sha256': after,
                   'execution_device': str(device),

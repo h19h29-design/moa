@@ -17,7 +17,7 @@ from pathlib import Path
 import shlex
 import subprocess
 
-from . import research_campaign as rc, research_pair_data as data, research_runner as rr
+from . import research_campaign as rc, research_pair_data as data, research_runner as rr, r2_research
 from .research_dataset import canonical, digest, project
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -185,17 +185,22 @@ def rows(root, variant, split):
             (variant+'-'+split+'.jsonl')).read_bytes().splitlines()]
 
 
-def stage(root):
-    root = Path(root)
-    folder = root/'alignment/stage'
-    spec = importlib.util.spec_from_file_location('research_publisher', ROOT/'scripts/moa-research-publish.py')
-    pub = importlib.util.module_from_spec(spec); spec.loader.exec_module(pub)
+def paired_configuration(item_count):
     config = {'epochs': 4, 'maximum_updates': 120, 'planned_updates': 120,
               'maximum_seconds': 1800, 'micro_batch': 1, 'grad_accum': 8,
               'freeze_encoder': True, 'loss': 'soft-ce', 'head_lr': .001, 'min_lr': 1e-6,
               'weight_decay': .01, 'grad_clip': 1., 'seed': 20261020,
               'max_len': 1024, 'head_max_len': 256, 'amp': False,
               'gradient_checkpointing': False, 'shuffle_options': ['choice']}
+    return r2_research.training_plan(config,item_count)['configuration']
+
+
+def stage(root):
+    root = Path(root)
+    folder = root/'alignment/stage'
+    spec = importlib.util.spec_from_file_location('research_publisher', ROOT/'scripts/moa-research-publish.py')
+    pub = importlib.util.module_from_spec(spec); spec.loader.exec_module(pub)
+    config = paired_configuration(len(rows(root,'paired','train')))
     bundles = {}
     for split in ('train', 'dev'):
         records = rows(root, 'paired', split)
