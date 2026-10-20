@@ -161,6 +161,8 @@ def queue(rows, policy, questions, with_gold=False):
     for row in rows:
         state = policy.state_for({**row['state'], 'questions': list(row['questions'])})
         qs = policy.questions(list(row['questions']))
+        if row['questions'] != qs:
+            raise ValueError('question contract differs; do not silently replace it')
         entry = {'case_id': row['case_id'], 'state': state, 'questions': qs}
         if with_gold:
             # Training labels stay on the worker only for the train split; they are

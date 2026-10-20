@@ -51,6 +51,9 @@ def summarize_root(root):
             state['previous_campaign_status'] = state['status']
             state['alignment'] = json.loads(aligned.read_bytes())
             state['status'] = state['alignment']['status']
+    binary_state = root/'binary/STATE.json'
+    if binary_state.exists():
+        state['binary_research'] = json.loads(binary_state.read_bytes())
     state.setdefault('operational_ready', False)
     state.setdefault('human_approvals', 0)
     return state

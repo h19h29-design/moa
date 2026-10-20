@@ -6,6 +6,36 @@ import pytest
 from moa import research_alignment as a, research_advance as advance
 
 
+def test_evaluation_uses_actual_training_order_after_canonical_json_transport():
+    import json
+    import copy
+    spec = importlib.util.spec_from_file_location('input_contract_worker',
+        Path(__file__).parents[1]/'scripts/moa-research-worker.py')
+    worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+    class Policy:
+        def state_for(self, state):
+            return {k: state[k] for k in ('title','file_role','source_complete',
+                'source_blocks','rendered_blocks','attachment_manifest')}
+        def questions(self, keys):
+            return {k: {'type':'choice','instructions':'Compare only the supplied facts',
+                'criteria':{'preserved':'same','changed':'different','insufficient':'unknown'}} for k in keys}
+    policy = Policy()
+    source = {'case_id':'transport-1', 'state':{'title':'', 'file_role':'notice',
+        'source_complete':True,'source_blocks':[{'id':'x','text':'신청 1개'}],
+        'rendered_blocks':[{'id':'h','source_refs':['x'],'visible_text':'신청 2개'}],
+        'attachment_manifest':[]}, 'questions':policy.questions(['conditions'])}
+    transported = json.loads(json.dumps(source, sort_keys=True))
+    before = copy.deepcopy(transported)
+    evaluated = worker.queue([transported], policy, ['conditions'])[0]
+    trained = worker.queue([source], policy, ['conditions'])[0]
+    assert json.dumps(evaluated, ensure_ascii=False) == json.dumps(trained, ensure_ascii=False)
+    assert list(evaluated['questions']['conditions']['criteria']) == ['preserved','changed','insufficient']
+    assert transported == before
+    transported['questions']['conditions']['instructions'] = 'incompatible question'
+    with pytest.raises(ValueError, match='question'):
+        worker.queue([transported], policy, ['conditions'])
+
+
 def test_incomplete_answers_stay_in_denominator_and_forced_labels_are_not_raw():
     rows = [{'case_id': label, 'expected': {'table_relations': label}}
             for label in ('preserved', 'changed', 'insufficient')]

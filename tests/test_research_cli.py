@@ -55,3 +55,15 @@ def test_advance_refuses_when_no_job_and_never_invents_progress(tmp_path, capsys
     cli.main(['advance', '--root', str(root)])
     printed = json.loads(capsys.readouterr().out)
     assert printed['status'] == 'NOT_STARTED'
+
+
+def test_status_shows_blocked_binary_preparation_without_rearming_campaign(tmp_path, capsys):
+    from moa.research_campaign import _write_atomic
+    _write_atomic(tmp_path/'STATE.json',{'status':'RESEARCH_PLATEAU'})
+    _write_atomic(tmp_path/'binary/STATE.json',{'status':'WAITING_BUDGET_AND_NEW_DATA',
+        'training_authorized':False,'optimizer_updates':0})
+    cli.main(['status','--root',str(tmp_path)])
+    value=json.loads(capsys.readouterr().out)
+    assert value['binary_research']['status']=='WAITING_BUDGET_AND_NEW_DATA'
+    assert value['status']=='RESEARCH_PLATEAU' and not value['binary_research']['training_authorized']
+    assert not (tmp_path/'BUDGET.jsonl').exists()

@@ -64,6 +64,22 @@ def _compared_table_blocks(state):
 
 
 def assess_evidence(provenance, state):
+    return _assess_evidence(provenance, state, require_render_coverage=True)
+
+
+def assess_source_evidence(provenance, state):
+    """Research source-acquisition gate, independent of HTML content omissions.
+
+    This does not certify the DOM or alter the existing production v2 gate.
+    Missing HTML belongs to content comparison, not source acquisition.
+    """
+    report = _assess_evidence(provenance, state, require_render_coverage=False)
+    report.update(version='moa.source-evidence.v1',
+                  authority='source_acquisition_inventory_not_model_or_gold')
+    return report
+
+
+def _assess_evidence(provenance, state, *, require_render_coverage):
     _shape(provenance, ('source_revision', 'render_revision', 'file', 'scope', 'tables', 'role'))
     if any(not isinstance(provenance[k], str) or not provenance[k] for k in ('source_revision', 'render_revision')):
         raise ValueError('source and render revision required')
@@ -80,7 +96,10 @@ def assess_evidence(provenance, state):
     source_ids = [b['id'] for b in state['source_blocks']]
     refs = [r for block in state['rendered_blocks'] for r in block['source_refs']]
     if (not source_ids or len(set(source_ids)) != len(source_ids) or
-            set(refs) != set(source_ids) or not set(source_ids) <= _ids(scope['provided_context_ids'])):
+            (require_render_coverage and set(refs) != set(source_ids)) or
+            (not require_render_coverage and scope_ok is True and
+             not _ids(scope['required_context_ids']) <= set(source_ids)) or
+            not set(source_ids) <= _ids(scope['provided_context_ids'])):
         scope_ok = False
     tables = provenance['tables']
     if not isinstance(tables, list) or len(tables) > 1000:
