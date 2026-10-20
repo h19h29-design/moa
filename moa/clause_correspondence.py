@@ -12,7 +12,7 @@ import re
 
 from .verification import content_tokens
 
-VERSION = 'moa.independent-clause.v16'
+VERSION = 'moa.independent-clause.v17'
 # Do not enumerate Korean endings after former/latter: an unseen ending can
 # still bind another field's order. Without a lexical parser, compounds such
 # as '전자공학' conservatively remain strict too. A left lexical boundary
@@ -65,8 +65,8 @@ _SUBJECT = re.compile(r'^([가-힣0-9 ]{2,35}?)(?:은|는|이|가)\s+\S.+(?:합�
 _QUOTE_PAIRS = {'"': '"', "'": "'", '“': '”', '‘': '’', '「': '」', '『': '』'}
 _QUOTE_CLOSE = set(_QUOTE_PAIRS.values())
 # Lexical evidence for a terminal NOMINAL predicate, not a suffix guess. Keep
-# this small, explicit and versioned. Entire tokens only: arbitrary compounds,
-# names and possible verb stems are not inferred from a noun-looking suffix.
+# this small, explicit and versioned. Entire tokens only here: productive noun
+# heads and quoted nominal constructions have separate evidence below.
 # These are notice vocabulary classes, not source-document/example lookups.
 _COPULA_NOUNS = frozenset('''
 학생 초등학생 중학생 고등학생 학부모 보호자 교사 선생님 참가자 신청자 대상자
@@ -86,6 +86,12 @@ _COPULA_QUANTITY = re.compile(
     r'(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[백천만억])?\s*'
     r'(년|월|일|시|분|초|원|명|인|개|과목|가지|회|번|장|부|권|학년|학기|주|개월|시간|kg|g|cm|mm|m|L)$')
 _UNIT_CONSONANT = {'kg': True, 'g': True, 'cm': False, 'mm': False, 'm': False, 'L': False}
+# Productive multi-syllable nominal heads, not arbitrary dictionary suffixes
+# such as 이/모/보/움직. The complete compound remains literal evidence.
+_HEADED_NOMINAL = re.compile(
+    r'[가-힣][가-힣0-9]{0,38}(?:학교|학과|학부|교실|도서관|교육청|배움터|'
+    r'신청서|동의서|안내문|준비물|교육원)$')
+_QUOTED_NOMINAL = re.compile(r'[가-힣][가-힣0-9]*(?: [가-힣0-9]+){0,5}$')
 
 
 def _nominal_copula_consonant(prefix):
@@ -104,6 +110,31 @@ def _nominal_copula_consonant(prefix):
             return _UNIT_CONSONANT[unit]
         return (ord(unit[-1]) - 0xac00) % 28 != 0
     return None
+
+
+def _open_nominal_evidence(prefix):
+    """Unregistered names need an independent NOMINAL construction.
+
+    A nominal compound head or a closed quoted name supplies evidence in THIS
+    string. A name field alone is insufficient (이름은 화면에 보입니다).
+    No opposite-side word, source lookup,
+    model verdict or list of document-specific proper names is consulted.
+    Unknown unmarked predicates and unknown Latin pronunciation stay strict.
+    """
+    token = prefix.rsplit(' ', 1)[-1]
+    if _HEADED_NOMINAL.fullmatch(token):
+        return (ord(token[-1]) - 0xac00) % 28 != 0, 'ordered_compound_nominal_copula'
+    for opening, closing in _QUOTE_PAIRS.items():
+        if not prefix.endswith(closing):
+            continue
+        start = prefix.rfind(opening, 0, len(prefix)-1)
+        if start < 0 or not _closed_literal_prefix(prefix[:start]):
+            continue
+        name = prefix[start+1:-1]
+        if (len(name) <= 60 and _QUOTED_NOMINAL.fullmatch(name) and
+                '가' <= name[-1] <= '힣'):
+            return (ord(name[-1]) - 0xac00) % 28 != 0, 'ordered_quoted_nominal_copula'
+    return None, None
 
 
 def _closed_literal_prefix(prefix):
@@ -152,7 +183,7 @@ def normalize_ordered_presentation(text):
     # A separated dependent noun 것 following an adnominal ㄴ/ㄹ/는 has
     # independent syntactic evidence. Preserve that entire antecedent; do not
     # generalize to arbitrary ...입니다/이에요 suffixes. Ordinary nouns need
-    # the separate explicit lexical/quantity evidence below.
+    # explicit lexical/quantity, nominal-head or quotation evidence below.
     for ending in (' 것입니다.', ' 것이에요.'):
         if value.endswith(ending):
             prefix = value[:-len(ending)]
@@ -167,9 +198,12 @@ def normalize_ordered_presentation(text):
             if not prefix or prefix[-1].isspace() or not _closed_literal_prefix(prefix):
                 continue
             consonant = _nominal_copula_consonant(prefix)
+            rule = 'ordered_lexical_nominal_copula'
+            if consonant is None:
+                consonant, rule = _open_nominal_evidence(prefix)
             if consonant is not None and ending in (
                     '입니다.', '이에요.' if consonant else '예요.'):
-                return prefix + '입니다.', ['ordered_lexical_nominal_copula']
+                return prefix + '입니다.', [rule]
     # Unknown copular paraphrases deliberately retain strict comparison.
     return value, []
 

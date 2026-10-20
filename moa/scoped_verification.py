@@ -15,7 +15,7 @@ from .verification import compare_fact_bundle, content_tokens, department_links
 from .clause_correspondence import (clause_correspondence, has_order_dependency, normalize_clause,
                                     ordered_presentation_correspondence, normalize_ordered_presentation)
 
-VERSION = 'moa.scoped-content-gate.v18'
+VERSION = 'moa.scoped-content-gate.v19'
 
 
 def compare_scoped_facts(state):
