@@ -23,6 +23,14 @@ class CampaignRefused(Exception):
     """A start/rearm request that would reuse or reset campaign identity."""
 
 
+def _abs_policy():
+    """The shipped limits, used only if a state file lost its snapshot."""
+    return {'rolling_budget_days': 7, 'max_train_time_rolling_seconds': 28800,
+            'max_train_time_per_calendar_day_seconds': 10800,
+            'max_candidate_runs_per_rolling_window': 8,
+            'max_train_time_per_candidate_seconds': 2700}
+
+
 class BudgetExhausted(Exception):
     """A candidate that would exceed the policy's rolling or daily caps."""
 

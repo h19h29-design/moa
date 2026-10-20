@@ -80,10 +80,7 @@ def run(args):
                          library='r2_research.py',
                          library_sha=file_hash(root / 'moa/r2_research.py'),
                          installed=INSTALLED, questions=questions(),
-                         class_prior=({'preserved': args.prior_preserved,
-                                       'changed': args.prior_changed,
-                                       'insufficient': args.prior_insufficient}
-                                      if args.balanced else None))
+                         train_sampling='balanced_oversample' if args.balanced else None)
     (stage / 'JOB.json').write_bytes(json.dumps(job, ensure_ascii=False, indent=1).encode())
     files = list(bundle_sha) + ['JOB.json', 'moa-research-worker.py', 'r2_research.py']
     subprocess.run(['ssh', 'jungwoohwang@192.168.1.71',
@@ -111,10 +108,7 @@ def main():
     parser.add_argument('--head-lr', type=float, default=0.0003,
                         help='E4: the tiny-overfit diagnostic converged at 1e-3, not 3e-4')
     parser.add_argument('--balanced', action='store_true',
-                        help='E4: reweight the target prior so normal rows are not drowned out')
-    parser.add_argument('--prior-preserved', type=float, default=2.25)
-    parser.add_argument('--prior-changed', type=float, default=1.0)
-    parser.add_argument('--prior-insufficient', type=float, default=3.0)
+                        help='E4: oversample the minority train classes instead of a no-op prior')
     run(parser.parse_args())
 
 

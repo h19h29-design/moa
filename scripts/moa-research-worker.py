@@ -125,7 +125,26 @@ def train(job_path, resume=False):
     result_file = folder / 'TRAIN_RESULT.json'
     if result_file.exists() and not resume:
         return json.loads(result_file.read_bytes())
-    rows = queue(rows_by_split['train'], policy, job['questions'], with_gold=True)
+    raw_rows = rows_by_split['train']
+    sampling = job.get('train_sampling')
+    if sampling == 'balanced_oversample':
+        # E4 done properly: the earlier class_prior multiply-and-renormalise was
+        # a no-op on one-hot targets, so balance the training data instead.
+        # Gold labels stay untouched; only which train rows repeat changes.
+        buckets = {}
+        for row in raw_rows:
+            label = next(iter(row['expected'].values()))
+            buckets.setdefault(label, []).append(row)
+        largest = max(len(v) for v in buckets.values())
+        balanced = []
+        for label in sorted(buckets):
+            items_in_class = sorted(buckets[label], key=lambda r: r['case_id'])
+            repeat = -(-largest // len(items_in_class))
+            balanced.extend((items_in_class * repeat)[:largest])
+        raw_rows = sorted(balanced, key=lambda r: r['case_id'])
+    elif sampling not in (None, 'none'):
+        raise ValueError('unknown train sampling mode')
+    rows = queue(raw_rows, policy, job['questions'], with_gold=True)
     with runtime.exclusive(ROOT / 'device.lock'):
         if not runtime.resources()['train_allowed']:
             return {'status': 'parked_resources', 'resources': runtime.resources()}
@@ -158,6 +177,27 @@ def train(job_path, resume=False):
         order_rng = random.Random(config.seed)
         before = parameter_hash(model)
         history, steps, cursor = [], 0, {'epoch': 0, 'next_microbatch': 0}
+        resume_from = None
+        if resume and result_file.exists():
+            # Resume only from a saved checkpoint whose identity still matches
+            # this job; an unknown or damaged boundary is never retried.
+            saved = json.loads(result_file.read_bytes())
+            if (saved.get('run_id') != job['run_id']
+                    or saved.get('data_sha256') != digest(canonical(
+                        [r['case_id'] for r in rows]))):
+                raise ValueError('resume boundary identity mismatch')
+            resume_from = Path(saved['checkpoint'])
+            for name, expected in saved['sha256'].items():
+                if file_hash(resume_from / name) != expected:
+                    raise ValueError('saved checkpoint changed')
+            steps = int(saved['updates'])
+            stored = torch.load(resume_from / 'training-state.pt', map_location='cpu',
+                                weights_only=False)
+            if stored.get('step') != steps:
+                raise ValueError('resume step mismatch')
+            cursor = dict(stored['cursor'])
+            history = list(stored.get('history') or [])
+            before = stored.get('initial_head_sha256') or before
         stop = threading.Event()
         previous = {sig: signal.signal(sig, lambda *_: stop.set())
                     for sig in (signal.SIGTERM, signal.SIGINT)}
@@ -185,6 +225,7 @@ def train(job_path, resume=False):
             gc.collect()
             torch.mps.synchronize()
             torch.mps.empty_cache()
+            prune_checkpoints(folder, keep={name, 'checkpoint'})
             return name, hashes
 
         def gate():
@@ -192,7 +233,10 @@ def train(job_path, resume=False):
                 raise InterruptedError('pause_requested')
             if time.monotonic() - started >= cfg['maximum_seconds'] - 10:
                 raise InterruptedError('time_limit')
-            if not runtime.resources()['train_allowed']:
+            current = runtime.resources()
+            if not current['train_allowed']:
+                # Record why, so a stop is diagnosable without guessing.
+                atomic_json(folder / 'RESOURCE_STOP.json', current)
                 raise InterruptedError('resource_guard')
 
         reason = None
@@ -200,32 +244,40 @@ def train(job_path, resume=False):
             model.train()
             model.encoder.eval()
             optimizer.zero_grad(set_to_none=True)
-            for epoch in range(config.epochs):
+            if resume_from is not None:
+                # Restore head weights and optimizer/scheduler state from the
+                # saved boundary so training continues rather than restarting.
+                model.load_state_dict(stored['head'], strict=False)
+                optimizer.load_state_dict(stored['optimizer'])
+                scheduler.load_state_dict(stored['scheduler'])
+                if stored.get('python_rng'):
+                    random.setstate(stored['python_rng'])
+                if stored.get('option_rng'):
+                    order_rng.setstate(stored['option_rng'])
+            for epoch in range(cursor['epoch'], config.epochs):
                 epoch_items = list(items)
                 random.Random(config.seed + epoch).shuffle(epoch_items)
-                for offset in range(0, len(items), config.grad_accum):
+                first = (cursor['next_microbatch'] if epoch == cursor['epoch'] else 0)
+                for offset in range(first, len(items), config.grad_accum):
                     gate()
                     window = epoch_items[offset:offset + config.grad_accum]
                     losses = []
                     for item in window:
                         gate()
+                        # MPS keeps freed blocks in its cache; without this the
+                        # process creeps up ~25 updates then trips the guard.
+                        gc.collect()
+                        torch.mps.synchronize()
+                        torch.mps.empty_cache()
                         order = tr.draw_option_order(item, order_rng, config.shuffle_options)
                         encoded = tr.encode_item(tok, item, 1024, 256, order, False)
                         batch = tr.collate_items([[encoded]], tok.pad_token_id)
                         logits = tr._forward(model, batch, torch.device('mps'), False, True)
                         loss = tr.soft_ce_loss(logits, batch['target'].to('mps'),
                                                batch['marker_mask'].to('mps'))
-                        # Optional class prior correction for the balanced-loss
-                        # hypothesis (E4). It rescales the normalised target only;
-                        # the model input and the gold label are untouched.
-                        prior = job.get('class_prior')
-                        if prior:
-                            weights = torch.tensor([float(prior[k]) for k in ('preserved', 'changed', 'insufficient')],
-                                                   device='mps')
-                            target = batch['target'].to('mps')
-                            weighted = target * weights.unsqueeze(0)
-                            total = weighted.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-                            loss = tr.soft_ce_loss(logits, weighted / total, batch['marker_mask'].to('mps'))
+                        # Class balance is handled by resampling the train rows
+                        # (train_sampling) because scaling a one-hot target and
+                        # renormalising is mathematically a no-op.
                         if not torch.isfinite(loss).item():
                             raise ValueError('nonfinite loss')
                         (loss / len(window)).backward()
@@ -278,6 +330,22 @@ def parameter_hash(model):
     return digest(b''.join(state[k].numpy().tobytes() for k in sorted(state)))
 
 
+def prune_checkpoints(folder, keep=()):
+    """Keep the newest snapshot only; older ones are 1.2GB each.
+
+    A resource stop must resume from the newest checkpoint, so anything older
+    than the one just written has no remaining use and would fill the disk.
+    """
+    import shutil
+    snapshots = sorted(p for p in Path(folder).iterdir()
+                       if p.is_dir() and (p.name.startswith('interim-')
+                                          or p.name.startswith('checkpoint-')))
+    for old in snapshots[:-1]:
+        if old.name in keep:
+            continue
+        shutil.rmtree(old, ignore_errors=True)
+
+
 def reload_and_predict(job_path):
     import torch
     job, rows_by_split, parent, ml, policy, runtime, tr = context(job_path)
@@ -291,7 +359,10 @@ def reload_and_predict(job_path):
             raise ValueError('saved checkpoint changed')
     receipt = folder / 'RELOAD.json'
     if receipt.exists():
-        return json.loads(receipt.read_bytes())
+        existing = json.loads(receipt.read_bytes())
+        # A receipt for an older checkpoint must never stand in for this one.
+        if existing.get('checkpoint_sha256') == saved['sha256'].get('model.safetensors'):
+            return existing
     with runtime.exclusive(ROOT / 'device.lock'):
         if not runtime.resources()['verify_allowed']:
             return {'status': 'waiting_resources'}
@@ -316,6 +387,9 @@ def reload_and_predict(job_path):
                 answers.append(entry)
         record = {'status': 'reloaded', 'run_id': job['run_id'],
                   'model_sha256': saved['sha256'].get('model.safetensors'),
+                  'checkpoint_sha256': saved['sha256'].get('model.safetensors'),
+                  'checkpoint_name': saved.get('checkpoint_name'),
+                  'updates': saved.get('updates'),
                   'answers': answers, 'seconds': time.monotonic() - started,
                   'separate_process': True, 'operational_promotion': False}
         atomic_json(receipt, record)

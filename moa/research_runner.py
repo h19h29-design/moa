@@ -52,7 +52,7 @@ def _quote(value):
 
 def job_payload(*, run_id, bundle, bundle_sha256, configuration, parent, parent_files,
                 protected_models, runner_sha, library, library_sha, installed, questions,
-                class_prior=None):
+                class_prior=None, train_sampling=None):
     if not RUN_ID.fullmatch(str(run_id)) or '..' in str(run_id):
         raise ValueError('unsafe run id')
     if any(str(name).startswith('blind') for name in bundle_sha256):
@@ -74,10 +74,10 @@ def job_payload(*, run_id, bundle, bundle_sha256, configuration, parent, parent_
         'operational_promotion': False,
         'automatic_approval': False,
     }
-    if class_prior:
-        if set(class_prior) != {'preserved', 'changed', 'insufficient'}:
-            raise ValueError('class prior must cover exactly the three labels')
-        payload['class_prior'] = {k: float(v) for k, v in class_prior.items()}
+    if train_sampling:
+        if train_sampling not in ('balanced_oversample', 'none'):
+            raise ValueError('unknown train sampling mode')
+        payload['train_sampling'] = train_sampling
     return payload
 
 
