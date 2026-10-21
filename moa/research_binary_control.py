@@ -220,9 +220,14 @@ def verify(root, plan, state):
     if len(raw)<prefix['bytes'] or hashlib.sha256(raw[:prefix['bytes']]).hexdigest()!=prefix['sha256']:
         raise ValueError('original append-only budget history changed')
     for base,files in [(folder/'stage',plan['stage_sha256']),(folder,plan['input_sha256']),
-                       (root,plan['lineage_sha256']),(a.ROOT,plan['implementation_sha256'])]:
+                       (root,plan['lineage_sha256'])]:
         if any(a.sha(base/n) != digest for n,digest in files.items()):
             raise ValueError('pinned binary implementation, source or input changed')
+    for name,digest in plan['implementation_sha256'].items():
+        if a.sha(a.ROOT/name) != digest:
+            from .research_book_resume import authorised_controller_revision
+            if not authorised_controller_revision(root,name,digest):
+                raise ValueError('pinned binary implementation changed')
     if state.get('input_preflight_sha256'):
         if a.sha(folder/'INPUT_PREFLIGHT.json') != state['input_preflight_sha256']:
             raise ValueError('actual tokenizer preflight changed')
@@ -370,6 +375,8 @@ def _running(root):
 
 
 def _launch(root, action, resume=False):
+    if (Path(root)/FOLDER/'book-transfer-20261021/PLAN.json').exists():
+        raise ValueError('MacBook-only handoff forbids Mini execution')
     if Path(root) != a.DEFAULT:raise ValueError('only the existing isolated worker is allowed')
     w = Path(root)/'mini-worker';incoming = w/'incoming'/RUN
     argv = ([str(incoming/'moa-research-worker.py'),'train','--job','JOB.json'] if action=='train' else
@@ -405,6 +412,9 @@ def _training_result(root, plan, result):
 def advance(root=a.DEFAULT, *, at=None):
     root = Path(root);folder = root/FOLDER;at = at or a.now()
     if (root/'PAUSED').exists():return {'status':'PAUSED_BY_OPERATOR'}
+    if (folder/'book-transfer-20261021/PLAN.json').exists():
+        from .research_book_resume import advance as book_advance
+        return book_advance(root,at=at)
     with (folder/'.controller.lock').open('a') as lock:
         try:fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:return {'status':'OBSERVE_ONLY','run_id':RUN}
