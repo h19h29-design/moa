@@ -129,3 +129,27 @@ def test_invalid_prior_evaluation_budget_cannot_be_erased(prior):
             dict(cumulative_reserved_seconds=prior + 90, cumulative_observed_seconds=prior + 5,
                  training_updates=0, model_inferences=0))
 
+
+def test_context_resolves_pinned_relative_library_from_incoming_not_ssh_home(tmp_path, monkeypatch):
+    module = helper()
+    monkeypatch.setattr(module, 'ROOT', tmp_path)
+    incoming = tmp_path / 'incoming' / module.RUN
+    incoming.mkdir(parents=True)
+    job = incoming / 'JOB-r1.json'
+    job.write_text('{}')
+    (incoming / 'r2_research.py').write_text('pinned runtime')
+    monkeypatch.chdir(tmp_path)
+    class Worker:
+        def context(self, path):
+            assert path == job
+            return Path('r2_research.py').read_text()
+    assert module.load_context(Worker(), job) == 'pinned runtime'
+
+
+def test_preload_correction_carries_failed_attempt_full_time_without_budget_reset():
+    old = dict(prior_evaluation_seconds=145.5, reserved_seconds=90, maximum_cumulative_seconds=600,
+               training_updates=0, new_candidates=0, execution_host='macbookair')
+    assert api().carry_preload_reservation(145.5, old) == 235.5
+    with pytest.raises(ValueError):
+        api().carry_preload_reservation(145.5, dict(old, prior_evaluation_seconds=55.5))
+

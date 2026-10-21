@@ -73,6 +73,14 @@ def sha(path):
     return digest.hexdigest()
 
 
+def load_context(worker, job_path):
+    """Match the existing worker's launch directory without changing its pins."""
+    if job_path.parent.resolve() != (ROOT / 'incoming' / RUN).resolve() or job_path.is_symlink():
+        raise ValueError('fixed incoming directory required')
+    os.chdir(job_path.parent)
+    return worker.context(job_path)
+
+
 def probe(control):
     started = time.monotonic()
     if control['run_id'] != RUN or control['maximum_seconds'] != 90:
@@ -100,7 +108,7 @@ def probe(control):
     spec = importlib.util.spec_from_file_location('input_probe_worker', incoming / 'moa-research-worker.py')
     worker = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(worker)
-    job, _, _, ml, _, runtime, tr = worker.context(job_path)
+    job, _, _, ml, _, runtime, tr = load_context(worker, job_path)
     spec = importlib.util.spec_from_file_location('original_evaluator', incoming / 'moa-research-book-evaluate.py')
     original = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(original)

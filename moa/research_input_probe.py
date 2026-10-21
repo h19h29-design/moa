@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -15,7 +16,9 @@ from . import research_book_results as recovery, research_binary_forensics as fo
 from .research_diagnostics import replay_binary
 
 HELPER = 'scripts/moa-research-book-input-probe.py'
-FOLDER = 'binary-training/book-transfer-20261021/paired-input-probe-20261021'
+INITIAL_FOLDER = 'binary-training/book-transfer-20261021/paired-input-probe-20261021'
+FOLDER = 'binary-training/book-transfer-20261021/paired-input-probe-r1-20261021'
+INITIAL_REVISION = 'dde9f5b1deb42095aca670357cf88c8767f45e39'
 
 
 def prior_seconds(state, audit):
@@ -26,6 +29,39 @@ def prior_seconds(state, audit):
             audit['training_updates'] != 0 or audit['model_inferences'] != 0):
         raise ValueError('carry the whole prior audit reservation without resetting time')
     return reserved
+
+
+def carry_preload_reservation(prior, failed):
+    if (failed['prior_evaluation_seconds'] != prior or failed['reserved_seconds'] != 90 or
+            failed['maximum_cumulative_seconds'] != 600 or failed['training_updates'] != 0 or
+            failed['new_candidates'] != 0 or failed['execution_host'] != 'macbookair' or prior + 90 > 510):
+        raise ValueError('preserve failed preload reservation in full; do not erase time')
+    return prior + 90
+
+
+def _preload_check():
+    """Read metadata only, proving the prior relative-library failure boundary."""
+    code = """import json,hashlib
+from pathlib import Path
+r=Path('/Users/jungwoohwang/Library/Application Support/MOA-LAYA')
+i=r/'incoming'/'moa-unattended-20261021-binary-train-01'
+j=json.loads((i/'JOB-r1.json').read_bytes()); lib=Path(j['library'])
+if lib.is_absolute() or '..' in lib.parts: raise ValueError('expected relative runtime')
+p=r/'research'/'moa-unattended-20261021-binary-train-01'/'input-probe-20261021'/'RESULT.json'
+print(json.dumps(dict(runtime_relative=True,ssh_home_library_exists=lib.exists(),
+    incoming_library_matches=hashlib.sha256((i/lib).read_bytes()).hexdigest()==j['library_sha256'],
+    probe_receipt_exists=p.exists(),model_loaded=False,model_inferences=0,training_updates=0)))
+"""
+    response = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+        '-o', 'ConnectTimeout=8', '-l', 'jungwoohwang', 'macbookair',
+        'python3 -c ' + shlex.quote(code)], capture_output=True, timeout=15)
+    if response.returncode or len(response.stdout) > 4096:
+        raise ValueError('read-only preload boundary check incomplete; do not dispatch')
+    value = json.loads(response.stdout)
+    if value != dict(runtime_relative=True, ssh_home_library_exists=False, incoming_library_matches=True,
+                     probe_receipt_exists=False, model_loaded=False, model_inferences=0, training_updates=0):
+        raise ValueError('not the known missing-runtime preload failure; do not retry')
+    return value
 
 
 def compare(request, original, projected, gold, *, train_counts):
@@ -69,9 +105,22 @@ def run(root=a.DEFAULT):
         if state['status'] != 'COMPLETE':
             raise ValueError('saved-model baseline must already be complete')
         prior = prior_seconds(state, audit)
+        initial = root / INITIAL_FOLDER
+        failed = rc._read_json(initial / 'RESERVATION.json')
+        if (initial / 'OBSERVATIONS.json').exists() or (initial / 'COMPARISON.json').exists():
+            raise ValueError('prior execution has observations; no preload correction')
+        for key, name in [('helper', HELPER), ('controller', 'moa/research_input_probe.py')]:
+            original_source = subprocess.run(['git', 'show', INITIAL_REVISION + ':' + name],
+                cwd=a.ROOT, capture_output=True, timeout=10, check=True).stdout
+            if hashlib.sha256(original_source).hexdigest() != failed['pins'][key]:
+                raise ValueError('failed implementation before-image differs')
+        prior = carry_preload_reservation(prior, failed)
         pins = dict(budget=a.sha(root / 'BUDGET.jsonl'), recovery_state=a.sha(recovery.folder(root) / 'STATE.json'),
             recovery_plan=a.sha(recovery.folder(root) / 'PLAN.json'), audit=a.sha(audit_path),
-            helper=a.sha(a.ROOT / HELPER), controller=a.sha(Path(__file__)))
+            helper=a.sha(a.ROOT / HELPER), controller=a.sha(Path(__file__)),
+            failed_preload_reservation=a.sha(initial / 'RESERVATION.json'))
+        if any(failed['pins'][key] != pins[key] for key in ('budget', 'recovery_state', 'recovery_plan', 'audit')):
+            raise ValueError('original preload identity or budget changed')
         if (p / 'COMPARISON.json').exists():
             result = rc._read_json(p / 'COMPARISON.json')
             if result['pins'] != pins:
@@ -84,6 +133,12 @@ def run(root=a.DEFAULT):
         if (not snap.get('online') or not snap.get('ready') or snap.get('busy') or snap.get('running') or
                 not snap['resources']['verify_allowed'] or snap['resources']['available_memory_bytes'] < 7 * 2**30):
             return dict(status='WAITING_BOOK_RESOURCE', training_updates=0, new_candidates=0)
+        boundary = _preload_check()
+        a.write_once(p / 'PRELOAD_RECONCILIATION.json', research.canonical(dict(
+            boundary=boundary, original_revision=INITIAL_REVISION, original_reservation_sha256=pins['failed_preload_reservation'],
+            reason='relative_runtime_missing_from_ssh_home_before_model_load',
+            correction='use_existing_incoming_working_directory_only', original_reservation_preserved=True,
+            training_updates=0, new_candidates=0, at=a.now())))
         reservation = forensics.reserve(p / 'RESERVATION.json', prior_seconds=prior, pins=pins)
         control = dict(run_id=binary.RUN, job_sha256=transfer['remote_job_sha256'], maximum_seconds=90,
             checkpoint_sha256=plan['checkpoint_sha256'],
