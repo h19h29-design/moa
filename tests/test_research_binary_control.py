@@ -4,6 +4,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+from pathlib import Path
 
 import pytest
 
@@ -300,3 +301,144 @@ def test_binary_allowance_rejects_broader_or_unbound_permission(tmp_path,monkeyp
     launches=[];runtime(monkeypatch,m,launches)
     assert m.advance(tmp_path,at='2026-10-21T08:00:00+09:00')['status']=='RECONCILIATION_REQUIRED'
     assert not launches
+
+
+def stopped_zero_boundary(root,monkeypatch):
+    """Real files/ledger for the resource stop; only OS launch/resources are fake."""
+    m=api();plan=fixture(root);launches=[];runtime(monkeypatch,m,launches)
+    m.advance(root,at='2026-10-21T07:52:19+09:00')
+    result=saved_training(root,plan,reason='resource_guard')
+    result.update(updates=0,seconds=5.91,training_complete=False,status='parked')
+    rc._write_atomic(root/'mini-worker/research'/m.RUN/'TRAIN_RESULT.json',result)
+    folder=root/m.FOLDER;state=rc._read_json(folder/'STATE.json')
+    state.update(status='RECONCILIATION_REQUIRED',reason='repeated zero-update resource stop',
+        resume_boundaries=[result['sha256']['training-state.pt']])
+    rc._write_atomic(folder/'STATE.json',state)
+    return m,plan,launches,result
+
+
+def test_operator_resource_resume_uses_same_reservation_and_can_dispatch_only_once(tmp_path,monkeypatch):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    assert hasattr(m,'grant_resource_resume'), 'explicit one-resume authorisation required'
+    history=(tmp_path/'BUDGET.jsonl').read_bytes()
+    receipt=m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:00+09:00')
+    assert receipt['additional_resume_attempts']==1
+    assert m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:01+09:00')==receipt
+    monkeypatch.setattr(m,'_resources',lambda root:dict(train_allowed=True,
+        verify_allowed=True,available_memory_bytes=7*2**30))
+    out=m.advance(tmp_path,at='2026-10-21T09:01:00+09:00')
+    assert out['status']=='TRAINING' and launches==[('train',False),('train',True)]
+    assert out['resume_boundaries']==[result['sha256']['training-state.pt']]
+    assert (tmp_path/'BUDGET.jsonl').read_bytes()==history
+    assert m.advance(tmp_path,at='2026-10-21T09:01:01+09:00')['status']=='DISPATCH_SETTLING'
+    # Even a NEW saved boundary may not authorise a second resume.
+    cp=Path(result['checkpoint']).with_name('checkpoint-0001');cp.mkdir()
+    (cp/'training-state.pt').write_bytes(b'another optimizer boundary')
+    result.update(seconds=12,updates=1,checkpoint=str(cp),
+        sha256={'training-state.pt':a.sha(cp/'training-state.pt')})
+    rc._write_atomic(tmp_path/'mini-worker/research'/m.RUN/'TRAIN_RESULT.json',result)
+    assert m.advance(tmp_path,at='2026-10-21T09:02:00+09:00')['status']=='RECONCILIATION_REQUIRED'
+    with pytest.raises(ValueError):m.grant_resource_resume(tmp_path,at='2026-10-21T09:03:00+09:00')
+    assert launches==[('train',False),('train',True)] and (tmp_path/'BUDGET.jsonl').read_bytes()==history
+
+
+@pytest.mark.parametrize('available,allowed',[(6.9,True),(7.5,False)])
+def test_one_resume_waits_for_model_loading_headroom_and_user_idle(tmp_path,monkeypatch,available,allowed):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    assert hasattr(m,'grant_resource_resume'), 'explicit one-resume authorisation required'
+    m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:00+09:00')
+    monkeypatch.setattr(m,'_resources',lambda root:dict(train_allowed=allowed,
+        verify_allowed=True,available_memory_bytes=int(available*2**30)))
+    out=m.advance(tmp_path,at='2026-10-21T09:01:00+09:00')
+    assert out['status']=='WAITING_RESOURCE' and not out.get('resource_resume_dispatched_at')
+    assert launches==[('train',False)]
+
+
+@pytest.mark.parametrize('invalid',['next_day','missing_reservation','unknown_stop','not_zero','changed_checkpoint'])
+def test_operator_resume_cannot_bypass_known_boundary_or_original_budget(tmp_path,monkeypatch,invalid):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    assert hasattr(m,'grant_resource_resume'), 'explicit one-resume authorisation required'
+    if invalid=='missing_reservation':(tmp_path/'BUDGET.jsonl').write_bytes(b'')
+    elif invalid=='unknown_stop':result['stop_reason']='unknown'
+    elif invalid=='not_zero':result['updates']=1
+    elif invalid=='changed_checkpoint':
+        (Path(result['checkpoint'])/'training-state.pt').write_bytes(b'corrupt')
+    rc._write_atomic(tmp_path/'mini-worker/research'/m.RUN/'TRAIN_RESULT.json',result)
+    when='2026-10-22T09:00:00+09:00' if invalid=='next_day' else '2026-10-21T09:00:00+09:00'
+    with pytest.raises(ValueError):m.grant_resource_resume(tmp_path,at=when)
+    assert launches==[('train',False)]
+    assert not (tmp_path/m.FOLDER/'RESOURCE_RESUME_AUTHORIZATION.json').exists()
+
+
+def test_resume_keeps_actual_receipt_bytes_not_a_reserialized_digest(tmp_path,monkeypatch):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    path=tmp_path/'mini-worker/research'/m.RUN/'TRAIN_RESULT.json'
+    path.write_text(json.dumps(result,indent=2)+'\n')
+    original=path.read_bytes()
+    m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:00+09:00')
+    assert (tmp_path/m.FOLDER/'RESOURCE_RESUME_TRAIN.before.json').read_bytes()==original
+
+
+def test_restoring_old_state_cannot_forget_a_consumed_single_resume(tmp_path,monkeypatch):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:00+09:00')
+    before=(tmp_path/m.FOLDER/'STATE.json').read_bytes()
+    monkeypatch.setattr(m,'_resources',lambda root:dict(train_allowed=True,
+        verify_allowed=True,available_memory_bytes=7*2**30))
+    assert m.advance(tmp_path,at='2026-10-21T09:01:00+09:00')['status']=='TRAINING'
+    # Simulated partial restore of bookkeeping, never a live/campaign file.
+    (tmp_path/m.FOLDER/'STATE.json').write_bytes(before)
+    out=m.advance(tmp_path,at='2026-10-21T09:02:00+09:00')
+    assert out['status']=='RECONCILIATION_REQUIRED'
+    assert launches==[('train',False),('train',True)]
+
+
+def test_failed_resume_launch_still_consumes_permission(tmp_path,monkeypatch):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:00+09:00')
+    monkeypatch.setattr(m,'_resources',lambda root:dict(train_allowed=True,
+        verify_allowed=True,available_memory_bytes=7*2**30))
+    def failed_launch(*args,**kwargs):raise OSError('controlled launch failure')
+    monkeypatch.setattr(m,'_launch',failed_launch)
+    out=m.advance(tmp_path,at='2026-10-21T09:01:00+09:00')
+    assert out['status']=='RECONCILIATION_REQUIRED' and out['resource_resume_dispatched_at']
+    assert (tmp_path/m.FOLDER/'RESOURCE_RESUME_DISPATCH.json').is_file()
+    with pytest.raises(ValueError):m.grant_resource_resume(tmp_path,at='2026-10-21T09:02:00+09:00')
+
+
+def test_crash_after_durable_resume_receipt_fails_closed(tmp_path,monkeypatch):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:00+09:00')
+    folder=tmp_path/m.FOLDER;state=rc._read_json(folder/'STATE.json')
+    rc._write_atomic(folder/'RESOURCE_RESUME_DISPATCH.json',dict(run_id=m.RUN,
+        authorisation_sha256=state['resource_resume_sha256'],
+        dispatched_at='2026-10-21T09:01:00+09:00',resume=True))
+    assert m.advance(tmp_path,at='2026-10-21T09:02:00+09:00')['status']=='RECONCILIATION_REQUIRED'
+    assert launches==[('train',False)]
+
+
+def test_one_resume_success_can_finish_existing_separate_evaluation(tmp_path,monkeypatch):
+    m,plan,launches,result=stopped_zero_boundary(tmp_path,monkeypatch)
+    history=(tmp_path/'BUDGET.jsonl').read_bytes()
+    m.grant_resource_resume(tmp_path,at='2026-10-21T09:00:00+09:00')
+    monkeypatch.setattr(m,'_resources',lambda root:dict(train_allowed=True,
+        verify_allowed=True,available_memory_bytes=7*2**30))
+    assert m.advance(tmp_path,at='2026-10-21T09:01:00+09:00')['status']=='TRAINING'
+    cp=Path(result['checkpoint']).with_name('final-0056');cp.mkdir()
+    for name in ('model.safetensors','training-state.pt'):(cp/name).write_bytes(b'new final '+name.encode())
+    result.update(updates=56,seconds=500,status='saved',training_complete=True,stop_reason=None,
+        checkpoint=str(cp),sha256={n:a.sha(cp/n) for n in ('model.safetensors','training-state.pt')})
+    rc._write_atomic(tmp_path/'mini-worker/research'/m.RUN/'TRAIN_RESULT.json',result)
+    assert m.advance(tmp_path,at='2026-10-21T09:10:00+09:00')['status']=='EVALUATING'
+    folder=tmp_path/m.FOLDER;request=rc._read_json(folder/'BINARY_REQUEST.json')
+    records=[dict(case_id=r['case_id'],mode=r['mode'],model='binary_candidate',split='dev',
+        family=r['family'],operation=r['operation'],prediction='changed',
+        probabilities={'preserved':.2,'changed':.8},system_forced=False)
+        for r in m.evaluation_inputs(request,[])]
+    rc._write_atomic(folder/'EVALUATION.json',dict(status='complete',records=records,seconds=5,
+        model_sha256=result['sha256']['model.safetensors'],separate_process=True,
+        request_sha256=plan['input_sha256']['BINARY_REQUEST.json']))
+    assert m.advance(tmp_path,at='2026-10-21T09:11:00+09:00')['status']=='COMPLETE'
+    assert set(rc._read_json(folder/'COMPARISON.json')['models'])=={'r1','paired','lr_control','binary_candidate'}
+    assert launches==[('train',False),('train',True),('evaluate',False)]
+    assert (tmp_path/'BUDGET.jsonl').read_bytes()==history
