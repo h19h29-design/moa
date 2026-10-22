@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import mobile, school_service as svc
+from . import mobile, school_service as svc, school_review, school_review_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -135,6 +135,7 @@ class SchoolHandler(Handler):
         if row['revision']:
             content += '<p><a href="/html?id='+ident+'">미검수 HTML</a> · <a href="/bundle?id='+ident+'">HTML·모든 원본 ZIP</a></p><iframe title="미검수 HTML" sandbox src="/html?id='+ident+'"></iframe>'
             content += '<p><a href="/structure?id='+ident+'">문서 구조 분석 · 미검수</a></p>'
+            content += '<p><a href="/structure-review?id='+ident+'">담당자 구조 검수·수정·이력</a></p>'
         return self._send(self._shell(content+'</section>'))
 
     def _structure(self, ident, query):
@@ -145,6 +146,7 @@ class SchoolHandler(Handler):
         content = '<h1>문서 구조 분석 · 미검수</h1><p>로컬 규칙과 원본 구조의 관찰 결과입니다. 후보·미확정 관계는 사람 확인이 필요합니다. 원본·파일 역할·승인 상태는 변경하지 않습니다.</p>'
         content += '<p>분석 버전 '+esc(analysis['version'])+' · 변환 버전 '+esc(analysis['conversion_revision'])+'</p>'
         content += '<p><a href="/structure?id='+quote(ident)+'&amp;revision='+quote(analysis['conversion_revision'])+'&amp;format=json">근거 JSON</a> · <a href="/notice?id='+quote(ident)+'">수신본</a></p>'
+        content += '<p><a href="/structure-review?id='+quote(ident)+'&amp;revision='+quote(analysis['conversion_revision'])+'">담당자 수정본·검수 이력 열기</a> (아래 자동 분석 원본은 보존됩니다.)</p>'
         names = {f['id']:f['filename'] for f in analysis['files']}
         content += '<h2>파일 묶음·처리 상태</h2><ul>'
         for f in analysis['files']:
@@ -170,6 +172,8 @@ class SchoolHandler(Handler):
             ident = q.get('id', [''])[0]
             if path == '/notice': return self._notice(ident)
             if path == '/structure': return self._structure(ident,q)
+            if path == '/structure-review': return school_review_web.render(self,ident,q)
+            if path == '/structure-history': return school_review_web.render_history(self,ident,q)
             if path not in ('/file','/html','/bundle'): return self._send('Not found', 404)
             row = svc.get_version(self.store, self._principal(), ident)
             if path == '/file':
@@ -183,6 +187,8 @@ class SchoolHandler(Handler):
             return self._send(body, ctype='text/html; charset=utf-8')
         except LookupError: return self._send('Not found', 404)
         except PermissionError: return self._send('Forbidden', 403)
+        except school_review.Conflict: return self._send('최신 분석·검수 버전을 다시 열어 확인하세요.', 409)
+        except ValueError: return self._send('조회 버전·페이지를 확인하세요.', 400)
 
     def _post(self):
         path = urlsplit(self.path).path
@@ -191,7 +197,7 @@ class SchoolHandler(Handler):
             if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
                 return self._send('Invalid request framing', 400)
             length = int(self.headers.get('Content-Length', '0'))
-            maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else 200_000
+            maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else (300_000 if path == '/structure-review' else 200_000)
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
             data = self.rfile.read(length)
@@ -204,6 +210,7 @@ class SchoolHandler(Handler):
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
             if path == '/logout': return self._logout()
+            if path == '/structure-review': return school_review_web.submit(self,form)
             if path == '/upload':
                 incoming = svc.IncomingPost(form.get('post_key', [''])[0], form.get('title', [''])[0], form.get('body', [''])[0], tuple(
                     svc.IncomingFile(name, raw, 'attachment' if i in attachment_indices else 'convert') for i, (name, raw) in enumerate(uploads)))
@@ -220,6 +227,7 @@ class SchoolHandler(Handler):
             return self._send('Not found', 404)
         except LookupError: return self._send('Not found', 404)
         except PermissionError: return self._send('Forbidden', 403)
+        except school_review.Conflict: return self._send('다른 수정·재변환이 있습니다. 최신 검수 화면을 다시 열어 내용을 대조한 뒤 저장하세요.', 409)
         except (ValueError, UnicodeError): return self._send('입력값·파일·최신 버전을 확인하세요.', 400)
 
     def setup(self):

@@ -4,6 +4,7 @@ HWPX/PDF are generated synthetic documents. Legacy binary HWP is an optional
 already-acquired private fixture; never embed its bytes or text in this repo.
 """
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -89,6 +90,35 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     if kind == 'hwpx': assert '12,000원' in rendered.decode() and '16:30' in rendered.decode()
     if kind == 'pdf': assert b'12,000' in rendered and b'16:30' in rendered
     if kind == 'hwp': assert digest(Path(os.environ['MOA_HWP_FIXTURE']).read_bytes()) == original_sha
+    # Staff corrections are a separate overlay, including on real HWP parsing.
+    # They do not mutate original objects, generated HTML, automatic evidence or
+    # research approval. Exercise the real HTTP flow, not only service methods.
+    review_url = '/structure-review?id='+ident+'&format=json'
+    review_status, review_raw, _ = fetch(opener,base,review_url)
+    assert review_status == 200
+    review = json.loads(review_raw)
+    block = next(b for b in review['analysis']['blocks'] if b['kind']=='body')
+    fields = {'csrf':csrf,'id':ident,'revision':version['revision'],
+        'base_hash':review['base_hash'],'expected_review':'','action':'block',
+        'block_id':block['id'],'block_kind':block['kind'],'text':block['text']+' [합성 검수 메모]',
+        'comment':'형식별 격리 시험의 담당자 수정'}
+    assert fetch(opener,base,'/structure-review',fields=fields)[0] == 200
+    changed = json.loads(fetch(opener,base,review_url)[1])
+    assert changed['status']=='draft' and changed['original']==analysis
+    assert fetch(opener,base,'/structure-review',fields={'csrf':csrf,'id':ident,'revision':version['revision'],
+        'base_hash':review['base_hash'],'expected_review':changed['latest']['id'],'action':'confirm',
+        'acknowledge_warnings':'yes','comment':'미확정 첨부 범위를 포함하여 확인'})[0] == 200
+    reviewed = json.loads(fetch(opener,base,review_url)[1])
+    assert reviewed['status']=='confirmed' and reviewed['analysis']['complete'] is False
+    assert svc.structure_for(store,svc.Principal('A','a'),ident)==analysis
+    assert fetch(opener,base,'/html?id='+ident)[1]==rendered
+    # ZIP container timestamps may differ across downloads; compare exact entry
+    # names and bytes, not that volatile container metadata.
+    with zipfile.ZipFile(io.BytesIO(fetch(opener,base,'/bundle?id='+ident)[1])) as after_zip, zipfile.ZipFile(io.BytesIO(zipped)) as before_zip:
+        assert {n:after_zip.read(n) for n in after_zip.namelist()} == {n:before_zip.read(n) for n in before_zip.namelist()}
+    history_status, history_raw, _ = fetch(opener,base,'/structure-history?id='+ident+'&format=json')
+    history = json.loads(history_raw)
+    assert history_status==200 and [e['action'] for e in history['events']]==['confirm','block']
     assert not store.db.execute('SELECT 1 FROM notices').fetchone()
     assert not store.db.execute('SELECT 1 FROM mobile_reviews').fetchone()
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
@@ -97,12 +127,17 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'candidate.html', rendered)
     atomic_write(evidence/'originals.zip', zipped)
     write_json(evidence/'structure.json',analysis)
+    write_json(evidence/'review.json',reviewed)
+    write_json(evidence/'review-history.json',history)
     write_json(evidence/'RESULT.json', {'format':kind, 'fixture':'existing_private' if kind == 'hwp' else 'synthetic',
         'source_sha256':original_sha, 'parser_status':result['sources'][0]['status'],
         'extracted_characters':len(result['sources'][0]['text']), 'blocks':len(result['blocks']),
         'warnings':[w['code'] for w in result['warnings']], 'structure_version':analysis['version'],
         'structure_blocks':len(analysis['blocks']),'structure_relations':len(analysis['relations']),
         'structure_complete':analysis['complete'],'structure_coverage':analysis['files'][0]['coverage'],
-        'http_structure':200,'http_upload':status,'http_html':html_status,
+        'http_structure':200,'http_review':review_status,'http_history':history_status,
+        'staff_review_status':reviewed['status'],'review_events':len(history['events']),
+        'automatic_analysis_unchanged':True,'conversion_html_and_zip_contents_unchanged':True,
+        'http_upload':status,'http_html':html_status,
         'http_zip':zip_status, 'originals_sha256_verified':True, 'private':True,
         'operational_db_used':False, 'human_approval_written':False, 'store':str(store.root)})

@@ -47,7 +47,7 @@ def main(argv=None):
     with Store(args.data, thread_safe=args.command == 'serve') as store:
         if args.command == 'migrate':
             backup = svc.migrate(store)
-            print('school_schema=1; backup=' + (str(backup) if backup else 'already_applied'))
+            print('school_schema=2; backup=' + (str(backup) if backup else 'already_applied'))
         elif args.command == 'configure':
             config = _json(args.config)
             for item in config['schools']:
