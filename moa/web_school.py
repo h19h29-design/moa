@@ -1,0 +1,215 @@
+"""Separate opt-in staff server; never delegates to research/admin HTTP routes.
+
+Only existing HTTP helpers, session/CSRF protection and multipart parsing are
+reused. Passwords are per-identity PBKDF2 records, not the shared review token.
+No public endpoint, live network intake, AI model, approval or deployment.
+"""
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import os
+import secrets
+import stat
+from pathlib import Path
+from urllib.parse import parse_qs, quote, urlsplit
+
+from . import mobile, school_service as svc
+from .web import Handler, PAGE, esc
+from .web_mobile import parse_upload
+
+ITERATIONS = 600_000
+
+
+def password_record(password):
+    """Call only with a protected input/getpass, never a shell literal or log."""
+    if not isinstance(password, str) or not 8 <= len(password) <= 512: raise ValueError('Password length')
+    salt = secrets.token_bytes(16)
+    return {'salt': salt.hex(), 'password_hash': hashlib.pbkdf2_hmac('sha256', password.encode(), salt, ITERATIONS).hex()}
+
+
+def _validate_credentials(users):
+    if not isinstance(users, dict) or len(users) > 500: raise ValueError('Invalid staff configuration')
+    for username, item in users.items():
+        svc._identifier(username, 'username')
+        svc._identifier(item['school'], 'school'); svc._identifier(item['subject'], 'subject')
+        if len(bytes.fromhex(item['salt'])) != 16 or len(bytes.fromhex(item['password_hash'])) != 32:
+            raise ValueError('Invalid password record')
+    return users
+
+
+def load_credentials(path):
+    path = Path(path)
+    st = path.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_uid != os.getuid():
+        raise PermissionError('Staff credential file must be owner-only (0600), not a symlink')
+    if st.st_size > 500_000: raise ValueError('Staff configuration too large')
+    return _validate_credentials(json.loads(path.read_text())['users'])
+
+
+class SchoolHandler(Handler):
+    token = ''                 # A shared review bearer must never confer school authority.
+    worker_token = ''
+    credentials = {}
+    session_cookie = 'moa_school_session'
+
+    def _login_enabled(self): return bool(self.credentials)
+
+    def _login_identity(self, form):
+        user = self.credentials.get(form.get('username', [''])[0])
+        password = form.get('password', [''])[0]
+        salt = bytes.fromhex(user['salt']) if user else b'\0' * 16
+        candidate = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, ITERATIONS).hex()
+        expected = user['password_hash'] if user else '0' * 64
+        if not secrets.compare_digest(candidate, expected) or not user: return None
+        try: svc.require_member(self.store, svc.Principal(user['school'], user['subject']))
+        except PermissionError: return None
+        return {'school': user['school'], 'subject': user['subject']}
+
+    def _session(self):
+        session = super()._session()
+        if not session or session.get('api') or not session.get('school') or not session.get('subject'): return None
+        try: svc.require_member(self.store, svc.Principal(session['school'], session['subject']))
+        except PermissionError: return None
+        return session
+
+    def _principal(self):
+        session = self._session()
+        if not session: raise PermissionError('Login required')
+        return svc.Principal(session['school'], session['subject'])
+
+    def _login_page(self, message='', status=200):
+        return self._send(PAGE + '<main class="card"><h1>학교 통신문 수신 · 비공개</h1><p>'+esc(message)+'</p>'
+            '<form method="post" action="/login"><label>담당자 ID <input name="username" autocomplete="username" required></label>'
+            '<label>암호 <input type="password" name="password" autocomplete="current-password" required></label>'
+            '<button>로그인</button></form><p>관리자가 지정한 학교의 자료만 열 수 있습니다.</p></main>', status)
+
+    def _page(self, content):
+        principal = self._principal()
+        return PAGE + '<nav><a href="/">학교 통신문</a> · '+esc(principal.school)+' · 비공개 (private)'
+        # Individual callers append the CSRF logout form to avoid mixing upload forms.
+
+    def _shell(self, content):
+        return self._page('') + '<form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
+
+    def _home(self):
+        principal = self._principal()
+        rows = svc.list_notices(self.store, principal)
+        content = '<h1>학교별 통신문 수신·관리</h1><p>자동 공개·실제 홈페이지 수집은 꺼져 있습니다.</p>'
+        if svc.require_member(self.store, principal)['role'] in svc.WRITE_ROLES:
+            content += ('<section class="card"><h2>담당자 직접 업로드</h2><form action="/upload" method="post" enctype="multipart/form-data">'+self._csrf_field()+
+                '<p>같은 게시글 키로 내용이 달라지면 정정본으로 보존됩니다.</p>'
+                '<label>게시글 키 <input name="post_key" maxlength="500" required></label>'
+                '<label>제목 <input name="title" maxlength="300" required></label>'
+                '<label>본문 HTML (선택)<textarea name="body" maxlength="100000"></textarea></label>'
+                '<label>HTML 변환할 안내문 <input name="guide" type="file" multiple></label>'
+                '<label>원본 첨부 <input name="attachments" type="file" multiple></label>'
+                '<p>본문 포함 최대 10개, 파일당 25MiB · 총 50MiB.</p><button>비공개 저장·역할 확인</button></form></section>')
+        for row in rows:
+            content += '<section class="card"><a href="/notice?id='+quote(row['latest_version'])+'">'+esc(row['title'])+'</a></section>'
+        content += '<h2>수신 출처·상태</h2>'
+        for source in svc.source_status(self.store, principal):
+            content += '<p>'+esc(source['id'])+' · '+esc(source['kind'])+' · '+esc(source['status'])+' · 마지막 성공 '+esc(source['last_success'] or '없음')+' · 마지막 시도 '+esc(source['last_attempt'] or '없음')+'</p>'
+        jobs = self.store.db.execute('SELECT id,status,payload FROM jobs WHERE kind IN (?,?) ORDER BY id DESC LIMIT 200', svc.KINDS)
+        for job in jobs:
+            if json.loads(job['payload'])['school'] != principal.school: continue
+            content += '<p>학교 작업 '+str(job['id'])+' · '+esc(job['status'])
+            if job['status'] == 'failed':
+                content += '<form method="post" action="/retry">'+self._csrf_field()+'<input type="hidden" name="job" value="'+str(job['id'])+'"><button>오류 재시도</button></form>'
+            content += '</p>'
+        return self._send(self._shell(content))
+
+    def _notice(self, ident):
+        row = svc.get_version(self.store, self._principal(), ident)
+        content = '<section class="card" data-version="'+ident+'"><h1>'+esc(row['title'])+'</h1><p>private · 수신 버전 '+str(row['sequence'])+' · '+esc(row['state'])+'</p>'
+        if row['previous_version']:
+            content += '<a href="/notice?id='+quote(row['previous_version'])+'">이전 수신본</a>'
+        content += '<form action="/convert" method="post">'+self._csrf_field()+'<input type="hidden" name="id" value="'+ident+'"><input type="hidden" name="revision" value="'+esc(row['revision'] or '')+'">'
+        for f in row['files']:
+            content += '<p><a href="/file?id='+ident+'&amp;file='+quote(f['id'])+'">'+esc(f['filename'])+'</a> <select name="role:'+esc(f['id'])+'">'
+            for role, label in [('convert','HTML 변환'),('attachment','원본 첨부')]:
+                content += '<option value="'+role+'"'+(' selected' if f['role'] == role else '')+'>'+label+'</option>'
+            content += '</select></p>'
+        content += '<button'+(' disabled' if row['state'] == 'processing' else '')+'>선택한 역할로 HTML 변환</button></form>'
+        if row['revision']:
+            content += '<p><a href="/html?id='+ident+'">미검수 HTML</a> · <a href="/bundle?id='+ident+'">HTML·모든 원본 ZIP</a></p><iframe title="미검수 HTML" sandbox src="/html?id='+ident+'"></iframe>'
+        return self._send(self._shell(content+'</section>'))
+
+    def _get(self):
+        path = urlsplit(self.path).path; q = parse_qs(urlsplit(self.path).query)
+        if path == '/login': return self._login_page()
+        if not self._session(): return self._login_page('로그인이 필요합니다.', 401)
+        try:
+            if path == '/': return self._home()
+            ident = q.get('id', [''])[0]
+            if path == '/notice': return self._notice(ident)
+            if path not in ('/file','/html','/bundle'): return self._send('Not found', 404)
+            row = svc.get_version(self.store, self._principal(), ident)
+            if path == '/file':
+                f = next((f for f in row['files'] if f['id'] == q.get('file', [''])[0]), None)
+                if not f: raise LookupError('File not found')
+                return self._send_bytes(self.store.object_path(f['sha256']).read_bytes(), f['filename'])
+            revision = mobile.revision(self.store, row['mobile_id'], school=True)
+            if not revision: raise LookupError('Conversion not ready')
+            if path == '/bundle': return self._send_bytes(mobile.bundle(self.store, row['mobile_id'], school=True), 'notice.zip', 'application/zip')
+            body = mobile.render_notice(revision['data'], file_url=lambda f: '/file?id='+ident+'&file='+quote(f['id']))
+            return self._send(body, ctype='text/html; charset=utf-8')
+        except LookupError: return self._send('Not found', 404)
+        except PermissionError: return self._send('Forbidden', 403)
+
+    def _post(self):
+        path = urlsplit(self.path).path
+        try:
+            # No chunked/ambiguous request bodies; bound BEFORE reading/parsing.
+            if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
+                return self._send('Invalid request framing', 400)
+            length = int(self.headers.get('Content-Length', '0'))
+            maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else 200_000
+            if not 0 < length <= maximum: return self._send('Request too large', 413)
+            if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
+            data = self.rfile.read(length)
+            if len(data) != length: return self._send('Incomplete request', 400)
+            if path == '/upload':
+                form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
+            else:
+                form = parse_qs(data.decode('utf-8'), max_num_fields=80)
+            if path == '/login': return self._login(form)
+            if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
+            principal = self._principal()
+            if path == '/logout': return self._logout()
+            if path == '/upload':
+                incoming = svc.IncomingPost(form.get('post_key', [''])[0], form.get('title', [''])[0], form.get('body', [''])[0], tuple(
+                    svc.IncomingFile(name, raw, 'attachment' if i in attachment_indices else 'convert') for i, (name, raw) in enumerate(uploads)))
+                result = svc.upload(self.store, principal, incoming)
+                return self._redirect('/notice?id='+result.version_id)
+            if path == '/convert':
+                edits = {k[5:]: {'role': v[0]} for k, v in form.items() if k.startswith('role:')}
+                ident = form.get('id', [''])[0]
+                svc.request_conversion(self.store, principal, ident, edits or None, form.get('revision', [''])[0])
+                return self._redirect('/notice?id='+ident)
+            if path == '/retry':
+                svc.retry_job(self.store, principal, int(form.get('job', [''])[0]))
+                return self._redirect('/')
+            return self._send('Not found', 404)
+        except LookupError: return self._send('Not found', 404)
+        except PermissionError: return self._send('Forbidden', 403)
+        except (ValueError, UnicodeError): return self._send('입력값·파일·최신 버전을 확인하세요.', 400)
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(15)
+
+
+def make_handler(store, credentials):
+    # Independent session/credential maps; research cookies and bearer tokens do
+    # not work here. No legacy serve()/research auto-queue side effects.
+    users = copy.deepcopy(_validate_credentials(credentials))
+    if not store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_migrations'").fetchone():
+        raise RuntimeError('Apply the explicit school migration first')
+    class ConfiguredHandler(SchoolHandler):
+        sessions = {}
+        login_attempts = {}
+    ConfiguredHandler.store = store
+    ConfiguredHandler.credentials = users
+    return ConfiguredHandler

@@ -146,6 +146,8 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, WorkerMixin, BaseHTTPRequestH
             if path.startswith('/obj/'):
                 return self._object(path.rsplit('/', 1)[-1])
             self._send('<p>404</p>', 404)
+        except mobile.SchoolAccessDenied:
+            self._send('<p>404</p>',404)
         except ValueError as exc:
             self._send(self._page('<div class="card">'+esc(exc)+'</div>'),400)
         except Exception:
@@ -280,6 +282,7 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, WorkerMixin, BaseHTTPRequestH
     def _object(self, sha: str):
         if not re.fullmatch(r'[a-f0-9]{64}', sha):
             return self._send('<p>잘못된 객체</p>', 400)
+        if mobile.school_object(self.store, sha): return self._send('<p>404</p>',404)
         path = self.store.object_path(sha)
         if not path.exists():
             return self._send('<p>없음</p>', 404)
@@ -325,7 +328,9 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, WorkerMixin, BaseHTTPRequestH
             if path.startswith('/mobile/'):
                 return self._mobile_post(path,form)
             if path != '/review': return self._send('<p>404</p>',404)
-        except (ValueError,KeyError) as exc:
+        except mobile.SchoolAccessDenied:
+            return self._send('<p>404</p>',404)
+        except (ValueError, KeyError) as exc:
             return self._send(self._page('<p>'+esc(exc)+'</p>'),400)
         except Exception:
             return self._send(self._page('<p>처리하지 못했습니다. 입력 파일·내용을 확인하세요.</p>'),500)

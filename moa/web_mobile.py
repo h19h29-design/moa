@@ -29,6 +29,30 @@ STYLE = ('label{display:block;margin:12px 0}label input:not([type=checkbox]),lab
          '@media(max-width:700px){.file-options{grid-template-columns:1fr}.preview{height:650px}.cell-editor{grid-template-columns:1fr}.cell-editor .coords{max-width:100%}}')
 
 
+def parse_upload(data, ctype, *, max_field_bytes=2000):
+    """Shared bounded multipart decoding. Authorization stays with each caller."""
+    if not ctype.startswith('multipart/form-data') or len(ctype) > 500 or '\r' in ctype or '\n' in ctype:
+        raise ValueError('파일 업로드 형식이 올바르지 않습니다.')
+    if len(data) > mobile.MAX_UPLOAD_BYTES + 1_000_000: raise ValueError('업로드 크기 제한')
+    message = BytesParser(policy=policy.default).parsebytes(
+        ('Content-Type: '+ctype+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+data)
+    if not message.is_multipart(): raise ValueError('업로드 파일을 확인하세요.')
+    fields, uploads, attach = {}, [], []
+    for count, part in enumerate(message.iter_parts()):
+        if count >= 60 or part.is_multipart(): raise ValueError('업로드 항목 제한')
+        name = part.get_param('name',header='content-disposition')
+        filename = part.get_filename()
+        raw = part.get_payload(decode=True) or b''
+        if filename:
+            if name not in ('guide','attachments'): raise ValueError('알 수 없는 파일 항목')
+            if name == 'attachments': attach.append(len(uploads))
+            uploads.append((filename, raw))
+        elif name:
+            if len(raw) > max_field_bytes or name in fields: raise ValueError('입력값 길이·중복 제한')
+            fields[name] = [raw.decode('utf-8','strict')]
+    return fields, uploads, attach
+
+
 class MobileMixin:
     def _page(self, content):
         from .web import PAGE
@@ -54,13 +78,14 @@ class MobileMixin:
         if suggestions:
             content += '<section class="card"><h2>오늘 확인할 자료 · 하루 최대 3건</h2><p class="muted">중요 예외 최대 2건과 전체 점검 표본 1건입니다. 보류는 오답이 아니며 자동 승인하지 않습니다.</p>'
             for item in suggestions:
+                if mobile.school_owned(self.store, item['mobile_id']): continue
                 entry = mobile.notice_row(self.store, item['mobile_id'])
                 label = '중요 예외' if item['reason'] == 'important_exception' else '전체 점검 표본'
                 content += '<p><a href="/notice?id=%s">%s</a> · %s</p>' % (esc(item['mobile_id']), esc(entry['title']), label)
             content += '</section>'
         content += '<h2>업로드·변환 기록 (전체 기록 · 매일 모두 검수할 필요 없음)</h2>'
-        rows = self.store.db.execute('SELECT * FROM mobile_notices WHERE origin_notice_id IS NULL OR latest_revision IS NOT NULL'
-                                    ' ORDER BY updated_at DESC LIMIT 60').fetchall()
+        rows = self.store.db.execute('SELECT n.* FROM mobile_notices n WHERE (origin_notice_id IS NULL OR latest_revision IS NOT NULL) AND '
+                                    +mobile.research_filter(self.store)+' ORDER BY updated_at DESC LIMIT 60').fetchall()
         states = {'files_ready':'파일 역할 확인','processing':'변환 중','candidate':'미검수','approved':'승인','held':'보류','rejected':'반려'}
         for row in rows:
             content += '<section class="card"><a href="/notice?id=%s">%s</a> <span class="pill">%s</span> <span class="muted">%s</span></section>' % (
@@ -69,24 +94,7 @@ class MobileMixin:
         self._send(self._page(content+'</main>'))
 
     def _upload(self, data):
-        ctype = self.headers.get('Content-Type','')
-        if not ctype.startswith('multipart/form-data') or len(ctype) > 500:
-            raise ValueError('파일 업로드 형식이 올바르지 않습니다.')
-        message = BytesParser(policy=policy.default).parsebytes(
-            ('Content-Type: '+ctype+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+data)
-        if not message.is_multipart(): raise ValueError('업로드 파일을 확인하세요.')
-        fields, uploads, attach = {}, [], []
-        for part in message.iter_parts():
-            name = part.get_param('name',header='content-disposition')
-            filename = part.get_filename()
-            raw = part.get_payload(decode=True) or b''
-            if filename:
-                if name not in ('guide','attachments'): raise ValueError('알 수 없는 파일 항목')
-                if name == 'attachments': attach.append(len(uploads))
-                uploads.append((filename,raw))
-            elif name:
-                if len(raw) > 2000: raise ValueError('입력값 길이 제한')
-                fields[name] = [raw.decode('utf-8','strict')]
+        fields, uploads, attach = parse_upload(data, self.headers.get('Content-Type',''))
         if not self._csrf(fields): return self._send('<p>요청 인증을 확인하세요.</p>',403)
         if urlsplit(self.path).path == '/mobile/add':
             ident = fields.get('id',[''])[0]

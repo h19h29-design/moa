@@ -85,8 +85,11 @@ def _evaluation(store, notice_id):
 def _file_evaluation(store, sha):
     # A different post pointing at the same physical file must not smuggle an
     # explicitly reserved evaluation original into recommendations.
+    from .mobile import research_filter
+    # School isolation is not an evaluation reservation. Only actual research
+    # evaluation rows may reserve identical bytes across collected records.
     return bool(store.db.execute("SELECT 1 FROM corpus_reviews r JOIN corpus_notices c ON c.notice_id=r.notice_id,json_each(c.files) j WHERE r.action='operator_decision' AND json_extract(r.payload,'$.use')='evaluation' AND json_extract(j.value,'$.file_id')=r.file_id AND json_extract(j.value,'$.sha256')=? LIMIT 1",(sha,)).fetchone() or
-                store.db.execute("SELECT 1 FROM mobile_notices n,json_each(n.files) f WHERE n.origin_notice_id IS NULL AND n.split='eval' AND json_extract(f.value,'$.sha256')=? LIMIT 1",(sha,)).fetchone())
+                store.db.execute("SELECT 1 FROM mobile_notices n,json_each(n.files) f WHERE n.origin_notice_id IS NULL AND n.split='eval' AND json_extract(f.value,'$.sha256')=? AND "+research_filter(store)+" LIMIT 1",(sha,)).fetchone())
 
 
 def classify_notice(store, notice_id):

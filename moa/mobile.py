@@ -32,6 +32,10 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_FILES = 10
 
 
+class SchoolAccessDenied(LookupError):
+    """Unscoped legacy paths must not reveal the existence of school records."""
+
+
 def default_role(filename: str) -> str:
     return 'attachment' if FORM_NAME.search(filename) else 'convert'
 
@@ -55,7 +59,7 @@ def validate_file(data: bytes, filename: str) -> dict:
     return {'filename': filename, 'kind': kind}
 
 
-def create_upload(store: Store, uploads: list[tuple[str, bytes]], title: str = '', attachment_indices=(), evaluation=False) -> str:
+def create_upload(store: Store, uploads: list[tuple[str, bytes]], title: str = '', attachment_indices=(), evaluation=False, *, commit=True) -> str:
     if not 1 <= len(uploads) <= MAX_FILES or sum(len(d) for _,d in uploads) > MAX_UPLOAD_BYTES:
         raise ValueError('최대 10개 파일, 전체 50MB까지 업로드할 수 있습니다.')
     checked = [(validate_file(data, name), data) for name,data in uploads]
@@ -71,7 +75,8 @@ def create_upload(store: Store, uploads: list[tuple[str, bytes]], title: str = '
     now = kst_now().isoformat()
     store.db.execute('INSERT INTO mobile_notices(id,title,files,split,created_at,updated_at) VALUES(?,?,?,?,?,?)',
                      (ident,title,encode(files),'eval' if evaluation else 'train',now,now))
-    store.db.commit()
+    if commit:
+        store.db.commit()
     return ident
 
 
@@ -129,15 +134,51 @@ def register_collected(store: Store, doc: dict) -> str:
     return ident
 
 
-def notice_row(store: Store, ident: str):
+def research_filter(store: Store, alias='n') -> str:
+    """Exclude opt-in school records without requiring/applying their migration."""
+    if not store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_versions'").fetchone():
+        return '1'
+    # alias is an internal SQL identifier, never a request value.
+    if not re.fullmatch(r'[a-z_]+', alias): raise ValueError('Invalid SQL alias')
+    return 'NOT EXISTS (SELECT 1 FROM school_service_versions sv WHERE sv.mobile_id='+alias+'.id)'
+
+
+def school_owned(store: Store, ident: str) -> bool:
+    if not store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_versions'").fetchone(): return False
+    return bool(store.db.execute('SELECT 1 FROM school_service_versions WHERE mobile_id=?', (ident,)).fetchone())
+
+
+def school_object(store: Store, sha: str) -> bool:
+    """Block school-only SHA URLs; preserve independent research references.
+
+    Sharing immutable bytes does not transfer the school notice's metadata or
+    access rights. A research reader may still download an already-authorized
+    research original with the same SHA through the existing review UI.
+    """
+    if not store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_versions'").fetchone(): return False
+    protected = store.db.execute('SELECT 1 FROM school_service_versions v JOIN mobile_notices n ON n.id=v.mobile_id'
+        ' WHERE EXISTS (SELECT 1 FROM json_each(n.files) f WHERE json_extract(f.value,\'$.sha256\')=?)'
+        ' OR EXISTS (SELECT 1 FROM mobile_revisions r WHERE r.notice_id=n.id AND r.html_sha=?) LIMIT 1', (sha, sha)).fetchone()
+    if not protected: return False
+    independent = store.db.execute('SELECT 1 FROM mobile_notices n WHERE '+research_filter(store)+
+        ' AND (EXISTS (SELECT 1 FROM json_each(n.files) f WHERE json_extract(f.value,\'$.sha256\')=?)'
+        ' OR EXISTS (SELECT 1 FROM mobile_revisions r WHERE r.notice_id=n.id AND r.html_sha=?)) LIMIT 1', (sha, sha)).fetchone()
+    if not independent:
+        independent = store.db.execute("SELECT 1 FROM notices n WHERE json_extract(n.payload,'$.source_page.sha256')=?"
+            " OR EXISTS (SELECT 1 FROM json_each(n.payload,'$.assets') f WHERE json_extract(f.value,'$.sha256')=?) LIMIT 1", (sha, sha)).fetchone()
+    return not bool(independent)
+
+
+def notice_row(store: Store, ident: str, *, school=False):
+    if not school and school_owned(store, ident): raise SchoolAccessDenied('Notice not found')
     row = store.db.execute('SELECT * FROM mobile_notices WHERE id=?', (ident,)).fetchone()
     if not row:
         raise ValueError('안내문을 찾을 수 없습니다.')
     return row
 
 
-def revision(store: Store, ident: str, revision_id: str = '') -> dict | None:
-    row = notice_row(store,ident)
+def revision(store: Store, ident: str, revision_id: str = '', *, school=False) -> dict | None:
+    row = notice_row(store,ident,school=school)
     rid = revision_id or row['latest_revision']
     found = store.db.execute('SELECT * FROM mobile_revisions WHERE id=? AND notice_id=?', (rid,ident)).fetchone()
     return {**dict(found), 'data':json.loads(found['payload'])} if found else None
@@ -309,7 +350,7 @@ def approved_rules(store: Store) -> dict:
     from .corpus import mobile_allowed
     rows = store.db.execute("SELECT n.id,n.origin_notice_id,n.approved_revision,r.payload FROM mobile_notices n"
                             " JOIN mobile_revisions r ON r.id=n.approved_revision"
-                            " WHERE n.state='approved' AND n.latest_revision=n.approved_revision AND n.split!='eval'")
+                            " WHERE n.state='approved' AND n.latest_revision=n.approved_revision AND n.split!='eval' AND "+research_filter(store))
     rules = {}
     for row in rows:
         if not mobile_allowed(store,row):continue
@@ -326,12 +367,13 @@ def approved_rules(store: Store) -> dict:
     return rules
 
 
-def build_conversion(store: Store, ident: str, edits: dict | None = None, title: str = '') -> dict:
+def build_conversion(store: Store, ident: str, edits: dict | None = None, title: str = '', *, use_approved_rules=True, school=False) -> dict:
     from .learn import extract_asset
-    row = notice_row(store,ident)
+    row = notice_row(store,ident,school=school)
+    if school and use_approved_rules: raise ValueError('School conversion cannot use research approvals')
     files = file_roles(json.loads(row['files']), edits) if edits is not None else json.loads(row['files'])
     blocks, warnings, excluded, audit, source_results, boundaries = [], [], [], [], [], []
-    rules = approved_rules(store)
+    rules = approved_rules(store) if use_approved_rules else {}
     for file in files:
         if file['role'] == 'attachment': continue
         result = extract_asset(store,file)
@@ -502,8 +544,9 @@ def render_notice(data: dict, file_url=None, candidate=True) -> str:
         '.moa-attachments span{font-size:12px;color:#667}</style>')
 
 
-def save_revision(store: Store, ident: str, data: dict) -> dict:
-    row = notice_row(store,ident)
+def save_revision(store: Store, ident: str, data: dict, *, export_rules=True, school=False, commit=True) -> dict:
+    row = notice_row(store,ident,school=school)
+    if school and export_rules: raise ValueError('School conversion cannot export research rules')
     data = copy.deepcopy(data)
     data['notice_id'] = ident
     fingerprint = digest(encode(data).encode())
@@ -517,9 +560,11 @@ def save_revision(store: Store, ident: str, data: dict) -> dict:
     store.db.execute("UPDATE mobile_notices SET title=?,files=?,latest_revision=?,approved_revision=NULL,"
                      " state='candidate',updated_at=? WHERE id=?",
                      (data['title'],encode(data['files']),rid,now,ident))
-    store.db.commit()
-    export_mobile(store)
-    return revision(store,ident)
+    if commit:
+        store.db.commit()
+    if export_rules:
+        export_mobile(store)
+    return revision(store,ident,school=school)
 
 
 def generate(store: Store, ident: str, edits=None, title='') -> dict:
@@ -591,7 +636,7 @@ def queue_conversion(store: Store, ident: str, rid: str, edits: dict, title: str
 def queue_outdated(store: Store) -> int:
     """An upgraded parser produces a fresh candidate; human versions stay archived."""
     rows = store.db.execute("SELECT n.id,n.title,n.files,n.latest_revision,r.payload FROM mobile_notices n"
-                            " JOIN mobile_revisions r ON r.id=n.latest_revision WHERE n.state!='processing'").fetchall()
+                            " JOIN mobile_revisions r ON r.id=n.latest_revision WHERE n.state!='processing' AND "+research_filter(store)).fetchall()
     count = 0
     for row in rows:
         data = json.loads(row['payload'])
@@ -621,16 +666,17 @@ def drain_mobile(store: Store, limit=1):
         except Exception as exc:
             # Failure is observable, no exception text or document content in logs.
             store.fail_job(job['id'],type(exc).__name__,max_attempts=1)
-            store.db.execute("UPDATE mobile_notices SET state=? WHERE id=?",
-                              ('candidate' if row and row['latest_revision'] else 'files_ready',job['ref_id']))
+            if not school_owned(store, job['ref_id']):
+                store.db.execute("UPDATE mobile_notices SET state=? WHERE id=?",
+                                  ('candidate' if row and row['latest_revision'] else 'files_ready',job['ref_id']))
             store.db.commit()
             outcomes.append('error')
     return outcomes
 
 
-def bundle(store: Store, ident: str) -> bytes:
-    row = notice_row(store,ident)
-    rev = revision(store,ident)
+def bundle(store: Store, ident: str, *, school=False) -> bytes:
+    row = notice_row(store,ident,school=school)
+    rev = revision(store,ident,school=school)
     if not rev: raise ValueError('먼저 모바일 HTML을 생성하세요.')
     data = rev['data']
     paths, written = {}, set()
