@@ -119,6 +119,21 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     history_status, history_raw, _ = fetch(opener,base,'/structure-history?id='+ident+'&format=json')
     history = json.loads(history_raw)
     assert history_status==200 and [e['action'] for e in history['events']]==['confirm','block']
+    from bs4 import BeautifulSoup
+    pinned = '?id='+ident+'&revision='+version['revision']+'&event='+reviewed['latest']['id']
+    preview_status, preview, _ = fetch(opener,base,'/review-preview'+pinned)
+    reviewed_status, reviewed_html, _ = fetch(opener,base,'/review-html'+pinned+'&download=1')
+    reviewed_zip_status, reviewed_zip, _ = fetch(opener,base,'/review-bundle'+pinned)
+    assert preview_status==reviewed_status==reviewed_zip_status==200
+    node = BeautifulSoup(reviewed_html,'html.parser').find(attrs={'data-block-id':block['id']})
+    assert node.find('p',class_='block-text').get_text()==fields['text']
+    with zipfile.ZipFile(io.BytesIO(reviewed_zip)) as z:
+        manifest=json.loads(z.read('manifest.json'))
+        assert manifest['review']['id']==reviewed['latest']['id']
+        assert manifest['analysis_complete'] is False
+        assert manifest['html_sha256']==digest(z.read('index.html'))
+        assert original_sha in [digest(z.read(f['path'])) for f in manifest['originals']]
+        assert all(digest(z.read(f['path']))==f['sha256'] for f in manifest['originals'])
     assert not store.db.execute('SELECT 1 FROM notices').fetchone()
     assert not store.db.execute('SELECT 1 FROM mobile_reviews').fetchone()
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
@@ -126,6 +141,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/('original.'+kind), raw)
     atomic_write(evidence/'candidate.html', rendered)
     atomic_write(evidence/'originals.zip', zipped)
+    atomic_write(evidence/'reviewed.html', reviewed_html)
+    atomic_write(evidence/'reviewed-originals.zip', reviewed_zip)
     write_json(evidence/'structure.json',analysis)
     write_json(evidence/'review.json',reviewed)
     write_json(evidence/'review-history.json',history)
@@ -137,6 +154,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'structure_complete':analysis['complete'],'structure_coverage':analysis['files'][0]['coverage'],
         'http_structure':200,'http_review':review_status,'http_history':history_status,
         'staff_review_status':reviewed['status'],'review_events':len(history['events']),
+        'http_reviewed_preview':preview_status,'http_reviewed_html':reviewed_status,'http_reviewed_zip':reviewed_zip_status,
+        'reviewed_edit_visible':True,'reviewed_zip_originals_sha256_verified':True,
         'automatic_analysis_unchanged':True,'conversion_html_and_zip_contents_unchanged':True,
         'http_upload':status,'http_html':html_status,
         'http_zip':zip_status, 'originals_sha256_verified':True, 'private':True,

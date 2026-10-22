@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import mobile, school_service as svc, school_review, school_review_web
+from . import mobile, school_service as svc, school_review, school_review_web, school_export_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -174,6 +174,8 @@ class SchoolHandler(Handler):
             if path == '/structure': return self._structure(ident,q)
             if path == '/structure-review': return school_review_web.render(self,ident,q)
             if path == '/structure-history': return school_review_web.render_history(self,ident,q)
+            if path in ('/review-preview','/review-html','/review-bundle'):
+                return school_export_web.serve(self,path,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=10))
             if path not in ('/file','/html','/bundle'): return self._send('Not found', 404)
             row = svc.get_version(self.store, self._principal(), ident)
             if path == '/file':

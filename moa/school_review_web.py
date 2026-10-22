@@ -3,6 +3,7 @@ import json
 from urllib.parse import quote
 
 from . import school_review as review
+from .school_export_web import link as export_link
 from .web import esc
 
 STATUS = {'unreviewed':'미검수', 'draft':'수정 중 · 확인 필요', 'confirmed':'담당자 확인 완료'}
@@ -50,10 +51,11 @@ def render(handler, ident, query):
     revision = original['conversion_revision']; url = _link('/structure-review',ident,revision)
     if v['historical_event']: url += '&amp;event='+quote(v['latest']['id'])
     content = '<h1>문서 구조 검수</h1><p><strong>'+esc(STATUS[v['status']])+'</strong> · 비공개</p>'
-    content += '<p>자동 분석 원본과 담당자 수정본은 별도입니다. 확인은 이 버전의 구조에만 적용되며 공개·원본 변경·HTML 재생성·학습·운영 승인이 아닙니다.</p>'
+    content += '<p>자동 분석 원본과 담당자 수정본은 별도입니다. 확인은 이 버전의 구조에만 적용되며 공개·원본 변경·기존 HTML 덮어쓰기·학습·운영 승인이 아닙니다.</p>'
     content += '<p>변환 버전 '+esc(revision)+' · <a href="'+_link('/structure',ident,revision)+'">자동 분석 원본</a> · <a href="'+_link('/structure-history',ident,revision)+'">검수 이력</a> · <a href="'+url+'&amp;format=json">수정본·근거 JSON</a> · <a href="/notice?id='+quote(ident)+'">수신본</a></p>'
     if v['latest']:
         content += '<p>검수 #'+str(v['latest']['sequence'])+' · '+esc(v['latest']['actor'])+' · '+esc(v['latest']['created_at'])+'</p>'
+        content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,v['latest']['id']))+'">이 검수 버전의 HTML 미리보기·다운로드</a></p>'
     if not v['editable']:
         content += '<p role="status">읽기 전용: 조회 권한, 이전 수신본/변환/검수 버전, 변환 진행 또는 명시적 마이그레이션 필요 상태입니다.</p>'
     content += '<h2>파일과 미확정 범위</h2><ul>'
@@ -117,6 +119,7 @@ def render_history(handler, ident, query):
     for e in result['events']:
         content += '<section class="card"><h2>#'+str(e['sequence'])+' · '+esc(STATUS[e['status']])+'</h2><p>'+esc(e['actor'])+' · '+esc(e['created_at'])+' · '+esc(e['action'])+'</p><p>사유: '+esc(e['comment'])+'</p>'
         content += '<p><a href="'+_link('/structure-review',ident,revision)+'&amp;event='+quote(e['id'])+'">당시 수정본 보기</a></p>'
+        content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,e['id']))+'">당시 수정본 HTML·다운로드</a></p>'
         for change in e['changes']:
             content += '<p>'+esc(change['target'])+' '+esc(change.get('id',''))+'</p><details open><summary>수정 전</summary><pre style="white-space:pre-wrap">'+esc(json.dumps(change['before'],ensure_ascii=False,indent=2))+'</pre></details><details open><summary>수정 후</summary><pre style="white-space:pre-wrap">'+esc(json.dumps(change['after'],ensure_ascii=False,indent=2))+'</pre></details>'
         content += '</section>'
