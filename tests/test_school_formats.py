@@ -134,6 +134,26 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         assert manifest['html_sha256']==digest(z.read('index.html'))
         assert original_sha in [digest(z.read(f['path'])) for f in manifest['originals']]
         assert all(digest(z.read(f['path']))==f['sha256'] for f in manifest['originals'])
+    # Compare stored automatic/review/history snapshots for each actual parser
+    # without rerunning it or changing the original/review/conversion evidence.
+    comparison_url='/structure-compare?id='+ident+'&revision='+version['revision']
+    pinned_pair=comparison_url+'&left=original&right='+reviewed['latest']['id']
+    before_compare=list(store.db.iterdump())
+    files_before={str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}
+    comparison_status,comparison_html,_=fetch(opener,base,pinned_pair)
+    json_status,comparison_raw,_=fetch(opener,base,pinned_pair+'&format=json')
+    assert comparison_status==json_status==200
+    comparison=json.loads(comparison_raw)
+    assert comparison['summary']['changed_blocks']==1 and comparison['complete'] is False
+    assert digest(comparison['blocks']['items'][0]['after']['text'].encode())==digest(fields['text'].encode())
+    assert comparison['files']==analysis['files'] and comparison['warnings']['items']==analysis['warnings']
+    status_only=json.loads(fetch(opener,base,comparison_url+'&left='+changed['latest']['id']+
+        '&right='+reviewed['latest']['id']+'&format=json')[1])
+    assert status_only['summary']['changed_blocks']==0 and status_only['summary']['status_changed'] is True
+    assert list(store.db.iterdump())==before_compare
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     assert not store.db.execute('SELECT 1 FROM notices').fetchone()
     assert not store.db.execute('SELECT 1 FROM mobile_reviews').fetchone()
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
@@ -143,6 +163,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'originals.zip', zipped)
     atomic_write(evidence/'reviewed.html', reviewed_html)
     atomic_write(evidence/'reviewed-originals.zip', reviewed_zip)
+    atomic_write(evidence/'comparison.html',comparison_html)
+    write_json(evidence/'comparison.json',comparison)
     write_json(evidence/'structure.json',analysis)
     write_json(evidence/'review.json',reviewed)
     write_json(evidence/'review-history.json',history)
@@ -156,6 +178,9 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'staff_review_status':reviewed['status'],'review_events':len(history['events']),
         'http_reviewed_preview':preview_status,'http_reviewed_html':reviewed_status,'http_reviewed_zip':reviewed_zip_status,
         'reviewed_edit_visible':True,'reviewed_zip_originals_sha256_verified':True,
+        'http_comparison':comparison_status,'http_comparison_json':json_status,
+        'comparison_changed_blocks':comparison['summary']['changed_blocks'],
+        'comparison_status_only_distinct':True,'comparison_db_objects_cache_unchanged':True,
         'automatic_analysis_unchanged':True,'conversion_html_and_zip_contents_unchanged':True,
         'http_upload':status,'http_html':html_status,
         'http_zip':zip_status, 'originals_sha256_verified':True, 'private':True,

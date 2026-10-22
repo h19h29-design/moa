@@ -3,6 +3,7 @@ import json
 from urllib.parse import quote
 
 from . import school_review as review
+from .school_review_compare import link as compare_link
 from .school_export_web import link as export_link
 from .web import esc
 
@@ -56,6 +57,7 @@ def render(handler, ident, query):
     if v['latest']:
         content += '<p>검수 #'+str(v['latest']['sequence'])+' · '+esc(v['latest']['actor'])+' · '+esc(v['latest']['created_at'])+'</p>'
         content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,v['latest']['id']))+'">이 검수 버전의 HTML 미리보기·다운로드</a></p>'
+        content += _compare_links(ident,revision,v['latest'])
     if not v['editable']:
         content += '<p role="status">읽기 전용: 조회 권한, 이전 수신본/변환/검수 버전, 변환 진행 또는 명시적 마이그레이션 필요 상태입니다.</p>'
     content += '<h2>파일과 미확정 범위</h2><ul>'
@@ -100,6 +102,13 @@ def render(handler, ident, query):
     return handler._send(handler._shell(content))
 
 
+def _compare_links(ident, revision, event):
+    content = '<p><a href="'+esc(compare_link(ident,revision,'original',event['id']))+'">자동 분석본과 변경점 비교</a>'
+    if event['previous_id']:
+        content += ' · <a href="'+esc(compare_link(ident,revision,event['previous_id'],event['id']))+'">직전 검수 버전과 비교</a>'
+    return content+'</p>'
+
+
 def render_history(handler, ident, query):
     revision = query.get('revision',[''])[0]
     v = review.view(handler.store,handler._principal(),ident,revision_id=revision)
@@ -120,6 +129,7 @@ def render_history(handler, ident, query):
         content += '<section class="card"><h2>#'+str(e['sequence'])+' · '+esc(STATUS[e['status']])+'</h2><p>'+esc(e['actor'])+' · '+esc(e['created_at'])+' · '+esc(e['action'])+'</p><p>사유: '+esc(e['comment'])+'</p>'
         content += '<p><a href="'+_link('/structure-review',ident,revision)+'&amp;event='+quote(e['id'])+'">당시 수정본 보기</a></p>'
         content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,e['id']))+'">당시 수정본 HTML·다운로드</a></p>'
+        content += _compare_links(ident,revision,e)
         for change in e['changes']:
             content += '<p>'+esc(change['target'])+' '+esc(change.get('id',''))+'</p><details open><summary>수정 전</summary><pre style="white-space:pre-wrap">'+esc(json.dumps(change['before'],ensure_ascii=False,indent=2))+'</pre></details><details open><summary>수정 후</summary><pre style="white-space:pre-wrap">'+esc(json.dumps(change['after'],ensure_ascii=False,indent=2))+'</pre></details>'
         content += '</section>'

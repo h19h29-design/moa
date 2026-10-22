@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import mobile, school_service as svc, school_review, school_review_web, school_export_web
+from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -164,11 +164,14 @@ class SchoolHandler(Handler):
         return self._send(self._shell(content+'</table>'))
 
     def _get(self):
-        path = urlsplit(self.path).path; q = parse_qs(urlsplit(self.path).query)
+        path = urlsplit(self.path).path
         if path == '/login': return self._login_page()
         if not self._session(): return self._login_page('로그인이 필요합니다.', 401)
         try:
+            if path == '/structure-compare':
+                return school_compare_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=10))
             if path == '/': return self._home()
+            q = parse_qs(urlsplit(self.path).query)
             ident = q.get('id', [''])[0]
             if path == '/notice': return self._notice(ident)
             if path == '/structure': return self._structure(ident,q)
