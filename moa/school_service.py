@@ -299,6 +299,14 @@ def source_status(store, principal, source_id=None):
     return [dict(r) for r in store.db.execute('SELECT * FROM school_service_sources WHERE school=? ORDER BY id', (principal.school,))]
 
 
+def structure_for(store, principal, ident, *, revision_id=''):
+    """Read only this school's immutable receiving version + conversion revision."""
+    version = get_version(store, principal, ident)
+    revision = mobile.revision(store, version['mobile_id'], revision_id, school=True)
+    if not revision or not revision['data'].get('structure'): raise LookupError('Structure not available')
+    return {**revision['data']['structure'], 'notice_version':ident, 'conversion_revision':revision['id']}
+
+
 def _enqueue(store, kind, payload, reference):
     try:
         store.db.execute('BEGIN IMMEDIATE')
@@ -415,6 +423,8 @@ def process_conversions(store, *, limit=1):
                 # Parsing has no DB writer transaction/global HTTP lock. A
                 # dedicated worker connection lets staff keep reading/uploading.
                 data = mobile.build_conversion(store, version['mobile_id'], p.get('edits'), use_approved_rules=False, school=True)
+                from .document_structure import build_analysis
+                data['structure'] = build_analysis(store, data['files'])
                 data['school_job_token'] = p['token']
                 store.db.execute('BEGIN IMMEDIATE')
                 lease = store.db.execute("SELECT 1 FROM jobs WHERE id=? AND owner=? AND status='running'", (job['id'], job['owner'])).fetchone()

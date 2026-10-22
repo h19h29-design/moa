@@ -11,6 +11,8 @@
 - 상세 사용법과 지원 범위: [docs/NOTICE_MOBILE.md](docs/NOTICE_MOBILE.md).
 - 학교별 비공개 수신·정정 이력·권한 분리(0–1단계, **외장 SSD 격리 개발만 / NAS 미배포**):
   [구현·DB 계약·검증 결과](docs/MOA_SCHOOL_SERVICE_2026-10-22.md).
+- 학교 문서의 헤더·본문·표·각주·첨부 관계(2단계, **로컬 구조 근거 / 미검수**):
+  [분석 계약·형식별 한계·검증 결과](docs/MOA_DOCUMENT_STRUCTURE_2026-10-22.md).
 - 기존 수집 자료 활용 분류: **https://moa.h19h19.com/corpus** → 파일별 역할·보류 사유 확인/수정.
   [docs/CORPUS.md](docs/CORPUS.md)의 후보/원본 첨부/보류/제외/평가 구분을 사용합니다.
 - 실자료는 자동 승인하지 않습니다. 승인한 변환 버전의 구조·표현만 다음 추천에 사용합니다.

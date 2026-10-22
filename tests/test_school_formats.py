@@ -26,17 +26,26 @@ def sample(kind):
     if kind == 'hwpx':
         with zipfile.ZipFile(out, 'w') as z:
             z.writestr('mimetype', 'application/hwp+zip')
-            z.writestr('Contents/section0.xml', '<hs:sec xmlns:hs="hs" xmlns:hp="hp"><hp:p><hp:run><hp:t>합성 행사 안내 2026-10-30 12,000원</hp:t></hp:run></hp:p><hp:p><hp:run><hp:t>신청 마감 16:30, 미신청 시 임의 배정.</hp:t></hp:run></hp:p></hs:sec>')
+            z.writestr('Contents/section0.xml', '<hs:sec xmlns:hs="hs" xmlns:hp="hp"><hp:p><hp:run><hp:ctrl><hp:header><hp:p><hp:run><hp:t>합성학교 가정통신문</hp:t></hp:run></hp:p></hp:header></hp:ctrl><hp:t>합성 행사 안내 2026-10-30 12,000원</hp:t><hp:ctrl><hp:footNote><hp:p><hp:run><hp:t>취소 시 비용 면제</hp:t></hp:run></hp:p></hp:footNote></hp:ctrl></hp:run></hp:p><hp:p><hp:run><hp:t>신청 마감 16:30, 미신청 시 임의 배정.</hp:t></hp:run></hp:p></hs:sec>')
+    elif kind == 'docx':
+        with zipfile.ZipFile(out,'w') as z:
+            z.writestr('word/document.xml','<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>Synthetic trip 2026-10-30 12,000 KRW</w:t><w:footnoteReference w:id="1"/></w:r></w:p><w:p><w:r><w:t>Application deadline 16:30.</w:t></w:r></w:p><w:sectPr><w:headerReference r:id="header1"/></w:sectPr></w:body></w:document>')
+            z.writestr('word/_rels/document.xml.rels','<Relationships><Relationship Id="header1" Target="header1.xml"/></Relationships>')
+            z.writestr('word/header1.xml','<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Synthetic School</w:t></w:r></w:p></w:hdr>')
+            z.writestr('word/footnotes.xml','<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:r><w:t>Cancellation fee waived.</w:t></w:r></w:p></w:footnote></w:footnotes>')
     elif kind == 'pdf':
         from reportlab.pdfgen import canvas
         c = canvas.Canvas(out, invariant=1)
-        c.drawString(50, 740, 'Synthetic school notice 2026-10-30 12,000 KRW')
-        c.drawString(50, 710, 'Deadline 16:30. No application: automatic allocation.')
+        for line in ('Synthetic trip 2026-10-30 12,000 KRW','Deadline 16:30. No application: automatic allocation.'):
+            c.drawString(50, 750, 'Synthetic School')
+            c.drawString(50, 710, line)
+            c.drawString(50, 100, '[1] Cancellation fee waived.')
+            c.showPage()
         c.save()
     return out.getvalue()
 
 
-@pytest.mark.parametrize('kind', ['hwp', 'hwpx', 'pdf'])
+@pytest.mark.parametrize('kind', ['hwp', 'hwpx', 'pdf', 'docx'])
 def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     _, store, base = school_web
     raw = sample(kind); original_sha = digest(raw)
@@ -55,6 +64,21 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     result = revision['data']
     assert result['sources'][0]['status'] == 'extracted'
     assert result['sources'][0]['text']
+    analysis = svc.structure_for(store,svc.Principal('A','a'),ident)
+    assert analysis['version'] == 'moa-school-structure-v1' and analysis['human_approved'] is False
+    assert len(analysis['files']) == 2 and analysis['files'][0]['sha256'] == original_sha
+    assert analysis['files'][0]['status'] == 'extracted' and analysis['files'][0]['block_count'] > 0
+    assert analysis['files'][1]['role'] == 'attachment' and analysis['files'][1]['status'] == 'needs_parser'
+    assert analysis['complete'] is False  # The untouched text attachment is not silently declared analyzed.
+    assert all(b['sha256'] == original_sha and b['locator']['format'] == kind for b in analysis['blocks'])
+    if kind in ('hwpx','docx'):
+        assert any(r['kind'] == 'header_for' and r['certainty'] == 'explicit' for r in analysis['relations'])
+        assert any(r['kind'] == 'footnote_for' and r['certainty'] == 'explicit' for r in analysis['relations'])
+    if kind == 'pdf':
+        assert {b['locator']['page'] for b in analysis['blocks']} == {1,2}
+        assert analysis['files'][0]['coverage']['native_zones'] is False
+    assert fetch(opener,base,'/structure?id='+ident)[0] == 200
+    assert fetch(opener,base,'/structure?id='+ident+'&format=json')[0] == 200
     html_status, rendered, _ = fetch(opener, base, '/html?id='+ident)
     zip_status, zipped, _ = fetch(opener, base, '/bundle?id='+ident)
     assert html_status == zip_status == 200
@@ -72,9 +96,13 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/('original.'+kind), raw)
     atomic_write(evidence/'candidate.html', rendered)
     atomic_write(evidence/'originals.zip', zipped)
+    write_json(evidence/'structure.json',analysis)
     write_json(evidence/'RESULT.json', {'format':kind, 'fixture':'existing_private' if kind == 'hwp' else 'synthetic',
         'source_sha256':original_sha, 'parser_status':result['sources'][0]['status'],
         'extracted_characters':len(result['sources'][0]['text']), 'blocks':len(result['blocks']),
-        'warnings':[w['code'] for w in result['warnings']], 'http_upload':status,'http_html':html_status,
+        'warnings':[w['code'] for w in result['warnings']], 'structure_version':analysis['version'],
+        'structure_blocks':len(analysis['blocks']),'structure_relations':len(analysis['relations']),
+        'structure_complete':analysis['complete'],'structure_coverage':analysis['files'][0]['coverage'],
+        'http_structure':200,'http_upload':status,'http_html':html_status,
         'http_zip':zip_status, 'originals_sha256_verified':True, 'private':True,
         'operational_db_used':False, 'human_approval_written':False, 'store':str(store.root)})

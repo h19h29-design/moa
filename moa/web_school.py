@@ -134,7 +134,32 @@ class SchoolHandler(Handler):
         content += '<button'+(' disabled' if row['state'] == 'processing' else '')+'>선택한 역할로 HTML 변환</button></form>'
         if row['revision']:
             content += '<p><a href="/html?id='+ident+'">미검수 HTML</a> · <a href="/bundle?id='+ident+'">HTML·모든 원본 ZIP</a></p><iframe title="미검수 HTML" sandbox src="/html?id='+ident+'"></iframe>'
+            content += '<p><a href="/structure?id='+ident+'">문서 구조 분석 · 미검수</a></p>'
         return self._send(self._shell(content+'</section>'))
+
+    def _structure(self, ident, query):
+        analysis = svc.structure_for(self.store, self._principal(), ident, revision_id=query.get('revision',[''])[0])
+        if query.get('format',[''])[0] == 'json':
+            return self._send(json.dumps(analysis,ensure_ascii=False), ctype='application/json; charset=utf-8')
+        labels = {'header':'헤더','heading':'제목·소제목','body':'본문','footer':'푸터·발신 정보','footnote':'각주','table':'표'}
+        content = '<h1>문서 구조 분석 · 미검수</h1><p>로컬 규칙과 원본 구조의 관찰 결과입니다. 후보·미확정 관계는 사람 확인이 필요합니다. 원본·파일 역할·승인 상태는 변경하지 않습니다.</p>'
+        content += '<p>분석 버전 '+esc(analysis['version'])+' · 변환 버전 '+esc(analysis['conversion_revision'])+'</p>'
+        content += '<p><a href="/structure?id='+quote(ident)+'&amp;revision='+quote(analysis['conversion_revision'])+'&amp;format=json">근거 JSON</a> · <a href="/notice?id='+quote(ident)+'">수신본</a></p>'
+        names = {f['id']:f['filename'] for f in analysis['files']}
+        content += '<h2>파일 묶음·처리 상태</h2><ul>'
+        for f in analysis['files']:
+            content += '<li>'+esc(f['filename'])+' · '+esc(f['role'])+' · '+esc(f['status'])+' · 구역 '+str(f['block_count'])+'</li>'
+        content += '</ul><h2>미확정·누락 확인</h2>'
+        for warning in analysis['warnings']:
+            content += '<p>'+esc(warning['code'])+' · '+esc(names.get(warning.get('file_id'),'묶음'))+' · '+esc(warning.get('reference',''))+'</p>'
+        content += '<h2>구역과 원본 위치</h2>'
+        for block in analysis['blocks']:
+            content += '<section class="card"><h3>'+esc(names[block['file_id']])+' · '+esc(block['id'])+' · '+esc(labels[block['kind']])+'</h3>'
+            content += '<p>'+esc(block['basis'])+' · '+esc(block['certainty'])+'</p><pre style="white-space:pre-wrap">'+esc(block['text'])+'</pre><p>'+esc(json.dumps(block['locator'],ensure_ascii=False))+'</p></section>'
+        content += '<h2>구역·첨부 관계</h2><table><tr><th>관계</th><th>출발 → 대상</th><th>근거·확실성</th></tr>'
+        for relation in analysis['relations']:
+            content += '<tr><td>'+esc(relation['kind'])+'</td><td>'+esc(relation['source'])+' → '+esc(relation['target'])+'</td><td>'+esc(relation['basis'])+' · '+esc(relation['certainty'])+'</td></tr>'
+        return self._send(self._shell(content+'</table>'))
 
     def _get(self):
         path = urlsplit(self.path).path; q = parse_qs(urlsplit(self.path).query)
@@ -144,6 +169,7 @@ class SchoolHandler(Handler):
             if path == '/': return self._home()
             ident = q.get('id', [''])[0]
             if path == '/notice': return self._notice(ident)
+            if path == '/structure': return self._structure(ident,q)
             if path not in ('/file','/html','/bundle'): return self._send('Not found', 404)
             row = svc.get_version(self.store, self._principal(), ident)
             if path == '/file':
