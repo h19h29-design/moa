@@ -105,7 +105,8 @@ def _load(store, principal, ident, revision_id='', event_id=''):
     effective = _apply(original, overlay)
     latest_version = store.db.execute('SELECT latest_version FROM school_service_posts WHERE school=? AND id=?',
         (principal.school, version['post_id'])).fetchone()[0]
-    stale = (version['revision'] != original['conversion_revision'] or latest_version != ident or version['state'] == 'processing')
+    stale = (version['revision'] != original['conversion_revision'] or latest_version != ident
+             or version['state'] in ('processing','conversion_failed'))
     event = _event(row)
     if event:
         for key in ('overlay','school','post_id','notice_version','conversion_revision'): event.pop(key, None)

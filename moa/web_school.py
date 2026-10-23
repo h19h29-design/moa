@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web, school_restore_web
-from . import school_overview, school_overview_web
+from . import school_overview, school_overview_web, school_queue_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -168,6 +168,10 @@ class SchoolHandler(Handler):
         if path == '/login': return self._login_page()
         if not self._session(): return self._login_page('로그인이 필요합니다.', 401)
         try:
+            if path == '/static/school-queue.js':
+                return self._send(Path(__file__).with_name('school_queue_ui.js').read_text(),ctype='text/javascript; charset=utf-8')
+            if path == '/review-queue/start': return school_queue_web.start(self,urlsplit(self.path).query)
+            if path == '/review-queue': return school_queue_web.render(self,urlsplit(self.path).query)
             if path == '/structure-restore':
                 return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
             if path == '/structure-compare':

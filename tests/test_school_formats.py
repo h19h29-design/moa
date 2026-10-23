@@ -202,6 +202,15 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert restored['latest']['id'] in overview_html_url
     for action in ('review','html','history'):
         assert fetch(opener,base,overview_row.select_one('a[data-action='+action+']')['href'])[0]==200
+    # Start the bounded sequential list through the actual overview link. The
+    # receiving/conversion IDs and existing restored audit remain unchanged.
+    queue_start=overview_page.select_one('a[data-action=queue-start]')['href']
+    queue_status,queue_html,_=fetch(opener,base,queue_start)
+    queue_page=BeautifulSoup(queue_html,'html.parser')
+    assert queue_status==200 and '1 / 1' in queue_page.select_one('#review-queue').get_text()
+    assert queue_page.select_one('input[name=id]')['value']==ident
+    assert queue_page.select_one('input[name=revision]')['value']==version['revision']
+    assert fetch(opener,base,queue_page.select_one('[data-queue=list]')['href'])[0]==200
     assert not BeautifulSoup(fetch(opener,base,'/?status=confirmed')[1],'html.parser').select('article[data-notice-version]')
     assert list(store.db.iterdump())==before_overview
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))

@@ -55,6 +55,9 @@ def render(result):
         content += '<option value="'+value+'"'+(' selected' if value==result['status'] else '')+'>'+label+'</option>'
     content += '</select></label><button>검색·필터 적용</button><a href="/#review-overview">조건 초기화</a></form>'
     content += '<p role="status">검색 결과 '+str(result['total'])+'건 · '+str(result['page'])+' / '+str(result['pages'])+'페이지 · 페이지당 최대 20건 · 최신 수신순</p>'
+    if not result['migration_required'] and any(r['structure_available'] and r['state']=='candidate' for r in result['rows']):
+        queue_url = '/review-queue/start?'+urlencode({k:result[k] for k in ('q','status','page')})
+        content += '<p><a data-action="queue-start" href="'+esc(queue_url)+'">이 페이지 연속 검수 시작</a> · 현재 페이지에서 변환이 완료된 문서만 엽니다.</p>'
     if not result['rows']:
         content += '<p class="card">검색 조건에 맞는 통신문이 없습니다.</p>'
     for row in result['rows']:
