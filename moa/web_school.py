@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web, school_restore_web
+from . import school_overview, school_overview_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -93,10 +94,11 @@ class SchoolHandler(Handler):
     def _shell(self, content):
         return self._page('') + '<form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
 
-    def _home(self):
+    def _home(self, query):
         principal = self._principal()
-        rows = svc.list_notices(self.store, principal)
+        overview = school_overview.overview(self.store, principal, **query)
         content = '<h1>학교별 통신문 수신·관리</h1><p>자동 공개·실제 홈페이지 수집은 꺼져 있습니다.</p>'
+        content += school_overview_web.render(overview)
         if svc.require_member(self.store, principal)['role'] in svc.WRITE_ROLES:
             content += ('<section class="card"><h2>담당자 직접 업로드</h2><form action="/upload" method="post" enctype="multipart/form-data">'+self._csrf_field()+
                 '<p>같은 게시글 키로 내용이 달라지면 정정본으로 보존됩니다.</p>'
@@ -106,8 +108,6 @@ class SchoolHandler(Handler):
                 '<label>HTML 변환할 안내문 <input name="guide" type="file" multiple></label>'
                 '<label>원본 첨부 <input name="attachments" type="file" multiple></label>'
                 '<p>본문 포함 최대 10개, 파일당 25MiB · 총 50MiB.</p><button>비공개 저장·역할 확인</button></form></section>')
-        for row in rows:
-            content += '<section class="card"><a href="/notice?id='+quote(row['latest_version'])+'">'+esc(row['title'])+'</a></section>'
         content += '<h2>수신 출처·상태</h2>'
         for source in svc.source_status(self.store, principal):
             content += '<p>'+esc(source['id'])+' · '+esc(source['kind'])+' · '+esc(source['status'])+' · 마지막 성공 '+esc(source['last_success'] or '없음')+' · 마지막 시도 '+esc(source['last_attempt'] or '없음')+'</p>'
@@ -172,7 +172,7 @@ class SchoolHandler(Handler):
                 return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
             if path == '/structure-compare':
                 return school_compare_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=10))
-            if path == '/': return self._home()
+            if path == '/': return self._home(school_overview_web.query(urlsplit(self.path).query))
             q = parse_qs(urlsplit(self.path).query)
             ident = q.get('id', [''])[0]
             if path == '/notice': return self._notice(ident)

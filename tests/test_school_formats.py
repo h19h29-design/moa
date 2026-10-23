@@ -190,6 +190,22 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert fetch(opener,base,'/html?id='+ident)[1]==rendered
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # The school overview reflects the restored draft and links that exact
+    # saved HTML/history, without rerunning extraction or changing any audit.
+    before_overview=list(store.db.iterdump())
+    overview_status,overview_html,_=fetch(opener,base,'/?status=draft')
+    overview_page=BeautifulSoup(overview_html,'html.parser')
+    overview_row=overview_page.select_one('article[data-notice-version="'+ident+'"]')
+    assert overview_status==200 and overview_row is not None
+    assert overview_row['data-status']=='draft'
+    overview_html_url=overview_row.select_one('a[data-action=html]')['href']
+    assert restored['latest']['id'] in overview_html_url
+    for action in ('review','html','history'):
+        assert fetch(opener,base,overview_row.select_one('a[data-action='+action+']')['href'])[0]==200
+    assert not BeautifulSoup(fetch(opener,base,'/?status=confirmed')[1],'html.parser').select('article[data-notice-version]')
+    assert list(store.db.iterdump())==before_overview
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)
@@ -222,6 +238,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'http_restore_preview':restore_preview_status,'http_restore':restore_status,
         'http_restored_html':restore_html_status,'http_restored_zip':restore_zip_status,
         'restored_content_matches_source':True,'restored_status':'draft',
+        'http_overview':overview_status,'overview_draft_and_pinned_links_verified':True,
+        'overview_db_objects_cache_unchanged':True,
         'prior_review_rows_and_exports_preserved':True,
         'automatic_analysis_unchanged':True,'conversion_html_and_zip_contents_unchanged':True,
         'http_upload':status,'http_html':html_status,
