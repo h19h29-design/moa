@@ -5,6 +5,7 @@ from urllib.parse import quote
 from . import school_review as review
 from .school_review_compare import link as compare_link
 from .school_export_web import link as export_link
+from .school_restore_web import link as restore_link
 from .web import esc
 
 STATUS = {'unreviewed':'미검수', 'draft':'수정 중 · 확인 필요', 'confirmed':'담당자 확인 완료'}
@@ -117,7 +118,7 @@ def render_history(handler, ident, query):
     if query.get('format',[''])[0]=='json':
         return handler._send(json.dumps(result,ensure_ascii=False),ctype='application/json; charset=utf-8')
     url = _link('/structure-history',ident,revision)
-    content = '<h1>문서 구조 검수 이력</h1><p>수정·확인·확인 취소는 삭제나 덮어쓰기 없이 추가됩니다.</p><a href="'+_link('/structure-review',ident,revision)+'">이 버전의 최신 검수</a>'
+    content = '<h1>문서 구조 검수 이력</h1><p>수정·확인·확인 취소·이전 검수본 복원은 삭제나 덮어쓰기 없이 추가됩니다. 복원 후에는 다시 검수가 필요합니다.</p><a href="'+_link('/structure-review',ident,revision)+'">이 버전의 최신 검수</a>'
     versions = review.conversions(handler.store,handler._principal(),ident,before=int(query.get('versions_before',['0'])[0]))
     content += '<h2>변환 버전별 검수 기록</h2><p>재변환 전 기록도 아래에서 열 수 있습니다. 구조 분석이 없던 구버전은 조회할 수 없습니다.</p><ul>'
     for row in versions['revisions']:
@@ -130,7 +131,17 @@ def render_history(handler, ident, query):
         content += '<p><a href="'+_link('/structure-review',ident,revision)+'&amp;event='+quote(e['id'])+'">당시 수정본 보기</a></p>'
         content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,e['id']))+'">당시 수정본 HTML·다운로드</a></p>'
         content += _compare_links(ident,revision,e)
-        for change in e['changes']:
+        if v['editable'] and e['id'] != v['latest']['id']:
+            content += '<p><a href="'+esc(restore_link(ident,revision,e['id']))+'">이 검수본을 새 수정본으로 복원</a></p>'
+        if e['action']=='restore':
+            source = next(c['after'] for c in e['changes'] if c['target']=='restore_source')
+            content += '<p>복원 출처: <a href="'+_link('/structure-review',ident,revision)+'&amp;event='+quote(source['event_id'],safe='')+'">검수 #'+str(source['sequence'])+'</a> · 다시 검수 필요로 저장</p>'
+            blocks = sum(c['target']=='block' for c in e['changes'])
+            relations = sum(c['target']=='relation' for c in e['changes'])
+            content += '<p>복원 변경: 구역 '+str(blocks)+'개 · 관계 '+str(relations)+'개. 수정 전·후 전체 내용은 위 직전 검수 버전과 비교에서 쪽별로 확인하세요.</p>'
+        # A restoration can span the whole document; do not multiply its full
+        # before/after text by 20 history entries on one HTML page.
+        for change in ([] if e['action']=='restore' else e['changes']):
             content += '<p>'+esc(change['target'])+' '+esc(change.get('id',''))+'</p><details open><summary>수정 전</summary><pre style="white-space:pre-wrap">'+esc(json.dumps(change['before'],ensure_ascii=False,indent=2))+'</pre></details><details open><summary>수정 후</summary><pre style="white-space:pre-wrap">'+esc(json.dumps(change['after'],ensure_ascii=False,indent=2))+'</pre></details>'
         content += '</section>'
     if result['next_before']: content += '<a href="'+url+'&amp;before='+str(result['next_before'])+'">이전 이력</a>'
@@ -140,7 +151,8 @@ def render_history(handler, ident, query):
 def submit(handler, form):
     # Reject ambiguous duplicate fields and authority/provenance injection.
     allowed = {'csrf','id','revision','base_hash','expected_review','action','comment',
-        'block_id','block_kind','text','relation_kind','relation_source','relation_target','acknowledge_warnings'}
+        'block_id','block_kind','text','relation_kind','relation_source','relation_target','acknowledge_warnings',
+        'source_event','acknowledge_restore'}
     if set(form)-allowed or any(len(values)!=1 for values in form.values()): raise ValueError('Invalid form fields')
     field = lambda k: form.get(k,[''])[0]
     kind = field('action'); action = {'kind':kind}
@@ -148,6 +160,10 @@ def submit(handler, form):
     elif kind in ('relation_add','relation_remove'):
         action['relation'] = {k:field('relation_'+k) for k in ('kind','source','target')}
     elif kind=='confirm': action['acknowledge_warnings'] = field('acknowledge_warnings')=='yes'
+    elif kind=='restore':
+        if set(form)-{'csrf','id','revision','base_hash','expected_review','action','comment','source_event','acknowledge_restore'}:
+            raise ValueError('Invalid restore form fields')
+        action.update(source_event=field('source_event'),acknowledge_restore=field('acknowledge_restore')=='yes')
     review.save(handler.store,handler._principal(),field('id'),revision_id=field('revision'),
         base_hash=field('base_hash'),expected_review=field('expected_review'),action=action,comment=field('comment'))
     return handler._redirect('/structure-review?id='+quote(field('id'),safe='')+'&revision='+quote(field('revision'),safe=''))

@@ -116,7 +116,7 @@ def render(handler, query):
     page.add('</div><button>선택한 두 버전 비교</button></form><p><a href="'+
         esc(compare.link(field('id'),field('revision'),field('right'),field('left')))+'">기준·대상 바꾸기</a> · '
         '<a href="'+_url(data,**(params | {'format':'json'}))+'">이 페이지의 비교 JSON</a></p>')
-    page.add('<p>선택 목록은 검수 이력 20개씩 표시합니다. 현재 선택한 버전은 목록을 넘겨도 유지됩니다. ')
+    page.add('<p>선택 목록은 검수 이력 최대 20개씩 표시합니다. 현재 선택한 버전은 목록을 넘겨도 유지됩니다. ')
     if history['next_before']: page.add('<a data-history="older" href="'+_url(data,**(params | {'before':history['next_before']}))+'">더 이전 검수 선택</a> ')
     if before: page.add('<a href="'+_url(data,**(params | {'before':0}))+'">최근 검수 목록</a>')
     page.add('</p><div class="compare-grid">')

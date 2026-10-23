@@ -48,8 +48,9 @@ MAX_TEXT = 20_000
 MAX_COMMENT = 2000
 MAX_OVERLAY_BYTES = 2 * 1024 * 1024
 MAX_VIEW_BYTES = 8 * 1024 * 1024
+MAX_HISTORY_BYTES = 8 * 1024 * 1024
 PAGE_SIZE = 20
-EVENT_COLUMNS = 'id,sequence,previous_id,actor,created_at,action,status,comment,warnings_acknowledged,base_hash,changes'
+EVENT_METADATA = 'id,sequence,previous_id,actor,created_at,action,status,comment,warnings_acknowledged,base_hash'
 
 
 class Conflict(ValueError):
@@ -124,11 +125,23 @@ def history(store, principal, ident, *, revision_id, before=0):
     original = svc.structure_for(store, principal, ident, revision_id=revision_id)
     if type(before) is not int or not 0 <= before < 2**63: raise ValueError('Invalid history cursor')
     if not available(store): return {'events':[], 'next_before':0}
-    rows = store.db.execute('SELECT '+EVENT_COLUMNS+' FROM school_structure_reviews WHERE school=? AND notice_version=?'
+    # Read sizes first: 20 whole-document restoration audits must not be
+    # fetched/decoded together. Preserve complete audit data and use a smaller
+    # page (with the same sequence cursor) when the byte budget is reached.
+    rows = store.db.execute('SELECT '+EVENT_METADATA+',length(CAST(changes AS BLOB)) AS audit_bytes'
+        ' FROM school_structure_reviews WHERE school=? AND notice_version=?'
         ' AND conversion_revision=? AND (?=0 OR sequence<?) ORDER BY sequence DESC LIMIT ?',
         (principal.school, ident, original['conversion_revision'], before, before, PAGE_SIZE+1)).fetchall()
-    events = [_event(r) for r in rows[:PAGE_SIZE]]
-    return {'events':events, 'next_before':events[-1]['sequence'] if len(rows)>PAGE_SIZE else 0}
+    events, used = [], 0
+    for row in rows[:PAGE_SIZE]:
+        if used + row['audit_bytes'] > MAX_HISTORY_BYTES:
+            if not events: raise ValueError('History audit size limit')
+            break
+        event = dict(row); used += event.pop('audit_bytes')
+        event['changes'] = store.db.execute('SELECT changes FROM school_structure_reviews WHERE id=?',
+            (row['id'],)).fetchone()[0]
+        events.append(_event(event))
+    return {'events':events, 'next_before':events[-1]['sequence'] if len(rows)>len(events) else 0}
 
 
 def conversions(store, principal, ident, *, before=0):
@@ -238,6 +251,43 @@ def _change(analysis, overlay, action, status):
     return changes, new_status
 
 
+def _restore(store, principal, ident, current, action):
+    """Copy one scoped historical overlay, never its approval or audit identity.
+
+    Called inside save's writer transaction. Looking up the source by all three
+    scope keys also rejects events from old conversions or other receiving
+    versions, even if they happen to use the same block IDs.
+    """
+    if set(action) != {'kind','source_event','acknowledge_restore'} or action['acknowledge_restore'] is not True:
+        raise ValueError('Explicit restore acknowledgement required')
+    source_id = _text(action['source_event'],160,required=True)
+    source, overlay, _ = _load(store,principal,ident,current['original']['conversion_revision'],source_id)
+    if not current['latest'] or source['latest']['sequence'] >= current['latest']['sequence']:
+        raise ValueError('A previous review event is required')
+    changes = [{'target':'restore_source','before':None,
+                'after':{'event_id':source_id,'sequence':source['latest']['sequence']}}]
+    blocks = {b['id']:b for b in source['analysis']['blocks']}
+    for b in current['analysis']['blocks']:
+        before = {k:b[k] for k in ('kind','text')}
+        after = {k:blocks[b['id']][k] for k in ('kind','text')}
+        if before != after:
+            changes.append({'target':'block','id':b['id'],'before':before,'after':after})
+    # Preserve every evidence record for a logical edge, not just the last one.
+    def edges(analysis):
+        grouped = {}
+        for r in analysis['relations']: grouped.setdefault(_key(r),[]).append(r)
+        return {key:sorted(values,key=encode) for key,values in grouped.items()}
+    old_edges, new_edges = edges(current['analysis']), edges(source['analysis'])
+    for key in sorted(old_edges.keys() | new_edges.keys()):
+        before, after = old_edges.get(key,[]), new_edges.get(key,[])
+        if before != after: changes.append({'target':'relation','before':before,'after':after})
+    if current['status'] != 'draft':
+        changes.append({'target':'status','before':current['status'],'after':'draft'})
+    if len(changes)==1: raise ValueError('No change')
+    if len(encode(changes).encode()) > MAX_VIEW_BYTES: raise ValueError('Restore audit size limit')
+    return copy.deepcopy(overlay), changes, 'draft'
+
+
 def save(store, principal, ident, *, revision_id, base_hash, expected_review, action, comment):
     """One writer transaction rechecks authorization, version, digest and parent.
 
@@ -255,7 +305,10 @@ def save(store, principal, ident, *, revision_id, base_hash, expected_review, ac
         latest = v['latest']
         if v['base_hash'] != base_hash or (latest['id'] if latest else '') != expected_review:
             raise Conflict('Review was changed by another request')
-        changes, status = _change(v['analysis'],overlay,action,v['status'])
+        if isinstance(action,dict) and action.get('kind')=='restore':
+            overlay, changes, status = _restore(store,principal,ident,v,action)
+        else:
+            changes, status = _change(v['analysis'],overlay,action,v['status'])
         encoded = encode(overlay)
         if len(encoded.encode()) > MAX_OVERLAY_BYTES or len(encode(_apply(v['original'],overlay)).encode()) > MAX_VIEW_BYTES:
             raise ValueError('Review size limit')

@@ -15,7 +15,7 @@ import stat
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web
+from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web, school_restore_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -168,6 +168,8 @@ class SchoolHandler(Handler):
         if path == '/login': return self._login_page()
         if not self._session(): return self._login_page('로그인이 필요합니다.', 401)
         try:
+            if path == '/structure-restore':
+                return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
             if path == '/structure-compare':
                 return school_compare_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=10))
             if path == '/': return self._home()
@@ -210,7 +212,7 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), max_num_fields=80)
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path=='/structure-review', max_num_fields=80)
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()

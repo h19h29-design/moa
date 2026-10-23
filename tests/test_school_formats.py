@@ -156,6 +156,40 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     assert not store.db.execute('SELECT 1 FROM notices').fetchone()
     assert not store.db.execute('SELECT 1 FROM mobile_reviews').fetchone()
+    # Restore a saved reviewed state after another edit; keep the original,
+    # automatic conversion, earlier review rows and pinned exports byte-stable.
+    old_history=[tuple(r) for r in store.db.execute('SELECT * FROM school_structure_reviews ORDER BY sequence')]
+    assert fetch(opener,base,'/structure-review',fields={**fields,
+        'expected_review':reviewed['latest']['id'],'text':'합성 임시 수정: 복원 대상으로 되돌립니다.'})[0]==200
+    interim=json.loads(fetch(opener,base,review_url)[1])
+    restore_url='/structure-restore?id='+ident+'&revision='+version['revision']+'&source='+reviewed['latest']['id']
+    restore_preview_status,restore_preview,_=fetch(opener,base,restore_url)
+    assert restore_preview_status==200
+    restore_status,_,_=fetch(opener,base,'/structure-review',fields={
+        'csrf':csrf,'id':ident,'revision':version['revision'],'base_hash':reviewed['base_hash'],
+        'expected_review':interim['latest']['id'],'action':'restore','source_event':reviewed['latest']['id'],
+        'acknowledge_restore':'yes','comment':'형식별 원본·이력 보존 복원 시험'})
+    assert restore_status==200
+    restored=json.loads(fetch(opener,base,review_url)[1])
+    assert restored['analysis']==reviewed['analysis'] and restored['status']=='draft'
+    assert restored['latest']['action']=='restore' and restored['latest']['warnings_acknowledged'] is False
+    assert [tuple(r) for r in store.db.execute('SELECT * FROM school_structure_reviews ORDER BY sequence')][:2]==old_history
+    restored_pin='?id='+ident+'&revision='+version['revision']+'&event='+restored['latest']['id']
+    restore_html_status,restored_html,_=fetch(opener,base,'/review-html'+restored_pin)
+    restore_zip_status,restored_zip,_=fetch(opener,base,'/review-bundle'+restored_pin)
+    assert restore_html_status==restore_zip_status==200
+    restored_node=BeautifulSoup(restored_html,'html.parser').find(attrs={'data-block-id':block['id']})
+    assert restored_node.find('p',class_='block-text').get_text()==fields['text']
+    assert fetch(opener,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert fetch(opener,base,'/review-bundle'+pinned)[1]==reviewed_zip
+    with zipfile.ZipFile(io.BytesIO(restored_zip)) as z:
+        restored_manifest=json.loads(z.read('manifest.json'))
+        assert restored_manifest['review']['status']=='draft'
+        assert all(digest(z.read(f['path']))==f['sha256'] for f in restored_manifest['originals'])
+    assert svc.structure_for(store,svc.Principal('A','a'),ident)==analysis
+    assert fetch(opener,base,'/html?id='+ident)[1]==rendered
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)
@@ -164,6 +198,10 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'reviewed.html', reviewed_html)
     atomic_write(evidence/'reviewed-originals.zip', reviewed_zip)
     atomic_write(evidence/'comparison.html',comparison_html)
+    atomic_write(evidence/'restore-preview.html',restore_preview)
+    atomic_write(evidence/'restored.html',restored_html)
+    atomic_write(evidence/'restored-originals.zip',restored_zip)
+    write_json(evidence/'restored-review.json',restored)
     write_json(evidence/'comparison.json',comparison)
     write_json(evidence/'structure.json',analysis)
     write_json(evidence/'review.json',reviewed)
@@ -181,6 +219,10 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'http_comparison':comparison_status,'http_comparison_json':json_status,
         'comparison_changed_blocks':comparison['summary']['changed_blocks'],
         'comparison_status_only_distinct':True,'comparison_db_objects_cache_unchanged':True,
+        'http_restore_preview':restore_preview_status,'http_restore':restore_status,
+        'http_restored_html':restore_html_status,'http_restored_zip':restore_zip_status,
+        'restored_content_matches_source':True,'restored_status':'draft',
+        'prior_review_rows_and_exports_preserved':True,
         'automatic_analysis_unchanged':True,'conversion_html_and_zip_contents_unchanged':True,
         'http_upload':status,'http_html':html_status,
         'http_zip':zip_status, 'originals_sha256_verified':True, 'private':True,
