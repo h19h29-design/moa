@@ -178,6 +178,9 @@ class SchoolHandler(Handler):
             if path == '/review-saved/lists': return school_saved_queue_web.directory(self,urlsplit(self.path).query)
             if path == '/structure-drafts': return school_draft_web.directory(self,urlsplit(self.path).query)
             if path == '/structure-draft': return school_draft_web.render(self,urlsplit(self.path).query)
+            if path == '/structure-draft/compare':
+                from . import school_draft_compare_web
+                return school_draft_compare_web.render(self,urlsplit(self.path).query)
             if path == '/structure-restore':
                 return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
             if path == '/structure-compare':

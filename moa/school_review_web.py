@@ -104,6 +104,8 @@ def render(handler, ident, query, *, queue=None, draft=None):
         content+='<p id="queue-unsaved" role="status" hidden>저장하지 않은 입력이 있습니다.</p><script src="/static/school-queue.js" defer></script>'
     if draft:
         content+='<section id="draft-restored" class="card"><h2>임시 입력 복구됨</h2><p>임시 #'+str(draft['sequence'])+' · '+esc(draft['created_at'])+' · 아직 정식 검수에 반영되지 않았습니다. 아래 항목을 확인하고 정식 저장하세요. 확인 체크는 복구하지 않습니다.</p></section>'
+        from .school_draft_compare_web import link as draft_compare_link
+        content+='<p><a data-draft-compare href="'+esc(draft_compare_link(draft['id']))+'">복구한 입력과 현재 검수본 비교</a></p>'
     if v['editable']:
         content+='<p>각 구역·관계는 입력이 1.5초 멈추면 개인 초안으로 자동 임시저장합니다. 항목별 완료 표시를 확인하세요. 정식 검수 반영은 별도 저장이 필요합니다. 확인/확인 취소·과거 검수본 복원은 자동저장하지 않습니다. JavaScript가 꺼지면 수동 임시저장을 사용하세요.</p>'
         if not installed: content+='<p>입력 임시 저장의 명시적 마이그레이션이 필요합니다. 이 조회는 DB를 변경하지 않습니다.</p>'

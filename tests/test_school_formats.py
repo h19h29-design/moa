@@ -108,6 +108,11 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     draft_status,draft_html,_=fetch(opener,base,'/structure-draft/save',fields={**fields,'expected_draft':'','comment':''})
     assert draft_status==200 and not store.db.execute('SELECT 1 FROM school_structure_reviews').fetchone()
     draft_id=store.db.execute('SELECT id FROM school_review_drafts').fetchone()[0]
+    draft_comparison=fetch(opener,base,'/structure-draft/compare?id='+draft_id)
+    assert draft_comparison[0]==200
+    comparison_page=BeautifulSoup(draft_comparison[1],'html.parser')
+    assert comparison_page.select_one('[data-draft-recover]')
+    assert comparison_page.select_one('[data-draft-compare-saved] pre').get_text()==fields['text']
     assert fetch(opener,base,'/logout',fields={'csrf':csrf})[0]==200
     opener=client(); csrf=login(opener,base); fields['csrf']=csrf
     before_input_recovery=list(store.db.iterdump())
@@ -123,6 +128,9 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert json.loads(fetch(opener,base,review_url)[1])==review
     assert fetch(opener,base,'/html?id='+ident)[1]==rendered
     assert fetch(opener,base,'/structure-review',fields=fields)[0] == 200
+    compared=BeautifulSoup(fetch(opener,base,'/structure-draft/compare?id='+draft_id)[1],'html.parser')
+    assert compared.select_one('[data-draft-reason="review_changed"]')
+    assert not compared.select_one('[data-draft-recover]')
     changed = json.loads(fetch(opener,base,review_url)[1])
     assert changed['status']=='draft' and changed['original']==analysis
     assert fetch(opener,base,'/structure-review',fields={'csrf':csrf,'id':ident,'revision':version['revision'],
