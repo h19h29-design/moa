@@ -24,7 +24,7 @@ def _form(handler, ident, v, action, queue=None, input_draft=None):
     fields = {'id':ident, 'revision':v['original']['conversion_revision'], 'base_hash':v['base_hash'],
               'expected_review':v['latest']['id'] if v['latest'] else '', 'action':action}
     if input_draft is not None: fields['expected_draft']=input_draft['expected']
-    return ('<form action="/structure-review" method="post" data-queue-review>'+
+    return ('<form action="/structure-review" method="post" data-queue-review'+(' data-draft-autosave' if input_draft is not None else '')+'>'+
             handler._csrf_field()+''.join(_hidden(k,val) for k,val in fields.items())+school_queue_web.hidden(queue))
 
 
@@ -34,6 +34,7 @@ def _reason(button, input_draft=None):
     if input_draft is not None:
         content+=' <button formaction="/structure-draft/save" formnovalidate data-draft-save>이 항목 입력 임시 저장</button>'
         if input_draft['resume']: content+=' <a data-draft-resume href="'+esc(input_draft['resume'])+'">저장된 임시 입력 복구</a>'
+        content+='<p data-draft-status role="status" aria-live="polite">자동 임시저장 준비 중 · JavaScript가 꺼져 있으면 수동 저장하세요.</p><button type="button" data-draft-retry hidden>임시 저장 다시 시도</button>'
     return content+'</form>'
 
 
@@ -104,8 +105,9 @@ def render(handler, ident, query, *, queue=None, draft=None):
     if draft:
         content+='<section id="draft-restored" class="card"><h2>임시 입력 복구됨</h2><p>임시 #'+str(draft['sequence'])+' · '+esc(draft['created_at'])+' · 아직 정식 검수에 반영되지 않았습니다. 아래 항목을 확인하고 정식 저장하세요. 확인 체크는 복구하지 않습니다.</p></section>'
     if v['editable']:
-        content+='<p>각 구역·관계의 입력과 사유를 항목별로 임시 저장할 수 있습니다. 버튼을 누른 항목만 저장하며 다른 입력은 자동 저장하지 않습니다. 확인/확인 취소·과거 검수본 복원은 임시 저장 대상이 아닙니다.</p>'
+        content+='<p>각 구역·관계는 입력이 1.5초 멈추면 개인 초안으로 자동 임시저장합니다. 항목별 완료 표시를 확인하세요. 정식 검수 반영은 별도 저장이 필요합니다. 확인/확인 취소·과거 검수본 복원은 자동저장하지 않습니다. JavaScript가 꺼지면 수동 임시저장을 사용하세요.</p>'
         if not installed: content+='<p>입력 임시 저장의 명시적 마이그레이션이 필요합니다. 이 조회는 DB를 변경하지 않습니다.</p>'
+        else: content+='<script src="/static/school-draft.js" defer></script>'
     content += '<p><strong>'+esc(STATUS[v['status']])+'</strong> · 비공개</p>'
     content += '<p>자동 분석 원본과 담당자 수정본은 별도입니다. 확인은 이 버전의 구조에만 적용되며 공개·원본 변경·기존 HTML 덮어쓰기·학습·운영 승인이 아닙니다.</p>'
     content += '<p>변환 버전 '+esc(revision)+' · <a href="'+_link('/structure',ident,revision)+'">자동 분석 원본</a> · <a href="'+_link('/structure-history',ident,revision)+'">검수 이력</a> · <a href="'+url+'&amp;format=json">수정본·근거 JSON</a> · <a href="/notice?id='+quote(ident)+'">수신본</a></p>'

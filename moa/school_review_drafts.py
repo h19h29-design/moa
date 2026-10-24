@@ -96,7 +96,8 @@ def metadata(store, principal, ident, revision, targets):
     return {r['target_key']:dict(r) for r in rows}
 
 
-def save(store, principal, ident, *, revision_id, base_hash, expected_review, expected_draft, action, comment):
+def save(store, principal, ident, *, revision_id, base_hash, expected_review, expected_draft, action, comment,
+         acknowledge_same=False):
     key(expected_draft,empty=True)
     try:
         store.db.execute('BEGIN IMMEDIATE')
@@ -108,6 +109,13 @@ def save(store, principal, ident, *, revision_id, base_hash, expected_review, ex
             raise review.Conflict('Review changed since input began')
         payload=_payload(action,comment,v['analysis']); topic=target(action)
         head=metadata(store,principal,ident,revision_id,[topic]).get(topic)
+        if acknowledge_same and head and head['base_hash']==base_hash and head['base_review']==expected_review:
+            saved=store.db.execute('SELECT previous_id,payload FROM school_review_drafts WHERE id=?',(head['id'],)).fetchone()
+            # Only acknowledge this head or the exact request that created it.
+            # A lost response must not append again, rebase or skip a newer edit.
+            if (expected_draft in (head['id'],saved['previous_id'] or '') and saved['payload']==payload):
+                store.db.commit()
+                return head['id']
         if (head['id'] if head else '')!=expected_draft: raise review.Conflict('Input draft changed in another tab')
         draft_id=uuid.uuid4().hex
         store.db.execute('INSERT INTO school_review_drafts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',

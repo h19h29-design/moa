@@ -1,5 +1,6 @@
-"""Explicit per-form save/recovery. No localStorage, autosave or review writes."""
+"""Private per-form save/recovery; autosave ACKs never contain document input."""
 import json
+import time
 from urllib.parse import urlencode
 
 from . import school_review as review, school_review_drafts as drafts, school_queue_web
@@ -52,7 +53,7 @@ def read_only(handler, row):
     return handler._send(handler._shell(content))
 
 
-def submit(handler, form):
+def submit(handler, form, *, autosave=False):
     common={'csrf','id','revision','base_hash','expected_review','expected_draft','action','comment'}
     context={'queue_id','queue_item','saved_id','saved_item'}
     kind=form.get('action',[''])[0]
@@ -61,11 +62,20 @@ def submit(handler, form):
             'relation_remove':{'relation_kind','relation_source','relation_target'}}
     if (kind not in fields or set(form)-(common|context|fields[kind]) or not (common|fields[kind])<=set(form)
             or any(len(v)!=1 for v in form.values())): raise ValueError('Invalid input draft form')
+    if autosave:
+        session=handler._session(); now=time.monotonic()
+        attempts=[t for t in session.get('draft_attempts',[]) if now-t<60]
+        if len(attempts)>=120: return handler._send('잠시 후 임시 저장을 다시 시도하세요.',429)
+        session['draft_attempts']=[*attempts,now]
     queue=school_queue_web.submission(handler,form); value=lambda k:form[k][0]
     action={'kind':kind}
     if kind=='block': action.update({k:value(k) for k in ('block_id','block_kind','text')})
     else: action['relation']={k:value('relation_'+k) for k in ('kind','source','target')}
     ident=drafts.save(handler.store,handler._principal(),value('id'),revision_id=value('revision'),
         base_hash=value('base_hash'),expected_review=value('expected_review'),expected_draft=value('expected_draft'),
-        action=action,comment=value('comment'))
+        action=action,comment=value('comment'),acknowledge_same=autosave)
+    if autosave:
+        row=drafts.get(handler.store,handler._principal(),ident)
+        return handler._send(json.dumps({'id':ident,'created_at':row['created_at'],'resume':link(ident,queue)}),
+                             ctype='application/json; charset=utf-8')
     return handler._redirect(link(ident,queue))

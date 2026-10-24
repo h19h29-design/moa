@@ -10,6 +10,13 @@
   const message = document.getElementById('queue-unsaved');
   let submitting = false;
   const update = () => { if (message) message.hidden = changed().length === 0; };
+  document.addEventListener('school-draft-saved',event=>{
+    const original=originals.get(event.target);
+    if (!original) return;
+    const saved=new Map(event.detail.entries);
+    for (const [element] of original) if (saved.has(element.name)) original.set(element,saved.get(element.name));
+    update(); // Only the acknowledged snapshot, never current in-flight typing.
+  });
   document.addEventListener('input', update);
   document.addEventListener('change', update);
   document.addEventListener('click', event => {
