@@ -84,3 +84,26 @@ test('IME composition holds a due job and resumes only on composition end', asyn
   a.value='완성'; queue.hold(a.job,false); time.advance(1500); await flush();
   assert.equal(new URLSearchParams(calls[0]).get('text'),'완성');
 });
+
+test('cancelling logout prevents native submission so autosave can resume; accepting it discards explicitly', () => {
+  const fs=require('node:fs'),vm=require('node:vm');
+  const listeners=new Map(), questions=[],field={name:'text',type:'textarea',value:'initial'};
+  const makeForm=elements=>({elements,listeners:[],addEventListener(kind,fn){if(kind==='submit')this.listeners.push(fn);},
+    hasAttribute:()=>false,getAttribute:()=>'/logout'});
+  const review=makeForm([field]),logout=makeForm([]);let accept=false;
+  const document={querySelectorAll:selector=>selector==='form[data-queue-review]'?[review]:
+      selector==='form[data-queue-navigation], form[action="/logout"]'?[logout]:[],
+    getElementById:()=>({hidden:true}),addEventListener(){}};
+  const window={confirm:message=>{questions.push(message);return accept;},addEventListener:(kind,fn)=>listeners.set(kind,fn)};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../moa/school_queue_ui.js'),'utf8'),{document,window});
+  field.value='unsaved';
+  const submit=()=>{const event={defaultPrevented:false,preventDefault(){this.defaultPrevented=true;}};
+    for(const fn of logout.listeners)fn(event);return event;};
+  assert.equal(submit().defaultPrevented,true,'Cancelled logout must cancel the submit event, not only beforeunload');
+  assert.match(questions[0],/로그아웃/);
+  const leave={preventDefault(){this.blocked=true;}};listeners.get('beforeunload')(leave);
+  assert.equal(leave.blocked,true,'Cancel must retain the dirty-page warning');
+  accept=true;assert.equal(submit().defaultPrevented,false);
+  const confirmed={preventDefault(){this.blocked=true;}};listeners.get('beforeunload')(confirmed);
+  assert.equal(confirmed.blocked,undefined,'Confirmed logout should not ask for a second discard decision');
+});
