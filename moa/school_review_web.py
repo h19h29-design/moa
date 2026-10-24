@@ -59,7 +59,7 @@ def render(handler, ident, query, *, queue=None):
         '#school-structure-review{min-width:0;overflow-wrap:anywhere}'
         '#school-structure-review input,#school-structure-review select,#school-structure-review textarea'
         '{max-width:100%;box-sizing:border-box}'
-        '</style><h1>문서 구조 검수</h1>')+(school_queue_web.banner(queue) if queue else '')
+        '</style><h1>문서 구조 검수</h1>')+(school_queue_web.banner(queue,handler) if queue else '')
     content += '<p><strong>'+esc(STATUS[v['status']])+'</strong> · 비공개</p>'
     content += '<p>자동 분석 원본과 담당자 수정본은 별도입니다. 확인은 이 버전의 구조에만 적용되며 공개·원본 변경·기존 HTML 덮어쓰기·학습·운영 승인이 아닙니다.</p>'
     content += '<p>변환 버전 '+esc(revision)+' · <a href="'+_link('/structure',ident,revision)+'">자동 분석 원본</a> · <a href="'+_link('/structure-history',ident,revision)+'">검수 이력</a> · <a href="'+url+'&amp;format=json">수정본·근거 JSON</a> · <a href="/notice?id='+quote(ident)+'">수신본</a></p>'
@@ -160,7 +160,7 @@ def submit(handler, form):
     # Reject ambiguous duplicate fields and authority/provenance injection.
     allowed = {'csrf','id','revision','base_hash','expected_review','action','comment',
         'block_id','block_kind','text','relation_kind','relation_source','relation_target','acknowledge_warnings',
-        'source_event','acknowledge_restore','queue_id','queue_item'}
+        'source_event','acknowledge_restore','queue_id','queue_item','saved_id','saved_item'}
     if set(form)-allowed or any(len(values)!=1 for values in form.values()): raise ValueError('Invalid form fields')
     field = lambda k: form.get(k,[''])[0]
     queue = school_queue_web.submission(handler,form)
@@ -170,7 +170,7 @@ def submit(handler, form):
         action['relation'] = {k:field('relation_'+k) for k in ('kind','source','target')}
     elif kind=='confirm': action['acknowledge_warnings'] = field('acknowledge_warnings')=='yes'
     elif kind=='restore':
-        if set(form)-{'csrf','id','revision','base_hash','expected_review','action','comment','source_event','acknowledge_restore','queue_id','queue_item'}:
+        if set(form)-{'csrf','id','revision','base_hash','expected_review','action','comment','source_event','acknowledge_restore','queue_id','queue_item','saved_id','saved_item'}:
             raise ValueError('Invalid restore form fields')
         action.update(source_event=field('source_event'),acknowledge_restore=field('acknowledge_restore')=='yes')
     review.save(handler.store,handler._principal(),field('id'),revision_id=field('revision'),

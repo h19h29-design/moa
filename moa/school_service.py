@@ -117,15 +117,18 @@ def migrate(store: Store):
     """
     exists = store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_migrations'").fetchone()
     versions = [r[0] for r in store.db.execute('SELECT version FROM school_service_migrations ORDER BY version')] if exists else []
-    if versions not in ([], [1], [1, 2]) or (exists and not versions):
+    if versions not in ([], [1], [1, 2], [1, 2, 3]) or (exists and not versions):
         raise RuntimeError('Unknown school schema; reconcile before migration')
-    if versions == [1, 2]: return None
+    if versions == [1, 2, 3]: return None
     from .school_review import SCHEMA_V2
-    backup = store.backup('school-service-v2-' + uuid.uuid4().hex[:12])
+    from .school_saved_queue import SCHEMA_V3
+    backup = store.backup('school-service-v3-' + uuid.uuid4().hex[:12])
     try:
-        store.db.executescript('BEGIN IMMEDIATE;\n' + (SCHEMA if not exists else '') + SCHEMA_V2)
+        store.db.executescript('BEGIN IMMEDIATE;\n' + (SCHEMA if not exists else '') +
+            (SCHEMA_V2 if 2 not in versions else '') + SCHEMA_V3)
         if not exists: store.db.execute('INSERT INTO school_service_migrations VALUES(1,?)', (_now(),))
-        store.db.execute('INSERT INTO school_service_migrations VALUES(2,?)', (_now(),))
+        if 2 not in versions: store.db.execute('INSERT INTO school_service_migrations VALUES(2,?)', (_now(),))
+        store.db.execute('INSERT INTO school_service_migrations VALUES(3,?)', (_now(),))
         store.db.commit()
     except Exception:
         store.db.rollback()

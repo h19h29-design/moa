@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web, school_restore_web
-from . import school_overview, school_overview_web, school_queue_web
+from . import school_overview, school_overview_web, school_queue_web, school_saved_queue_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -92,7 +92,7 @@ class SchoolHandler(Handler):
         # Individual callers append the CSRF logout form to avoid mixing upload forms.
 
     def _shell(self, content):
-        return self._page('') + '<form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
+        return self._page('') + ' · <a href="/review-saved">저장한 검수 목록</a><form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
 
     def _home(self, query):
         principal = self._principal()
@@ -172,6 +172,8 @@ class SchoolHandler(Handler):
                 return self._send(Path(__file__).with_name('school_queue_ui.js').read_text(),ctype='text/javascript; charset=utf-8')
             if path == '/review-queue/start': return school_queue_web.start(self,urlsplit(self.path).query)
             if path == '/review-queue': return school_queue_web.render(self,urlsplit(self.path).query)
+            if path == '/review-saved': return school_saved_queue_web.render(self,urlsplit(self.path).query)
+            if path == '/review-saved/lists': return school_saved_queue_web.directory(self,urlsplit(self.path).query)
             if path == '/structure-restore':
                 return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
             if path == '/structure-compare':
@@ -216,12 +218,13 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), keep_blank_values=path=='/structure-review', max_num_fields=80)
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move'), max_num_fields=80, errors='strict')
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
             if path == '/logout': return self._logout()
             if path == '/structure-review': return school_review_web.submit(self,form)
+            if path in ('/review-queue/save','/review-saved/move'): return school_saved_queue_web.submit(self,path,form)
             if path == '/upload':
                 incoming = svc.IncomingPost(form.get('post_key', [''])[0], form.get('title', [''])[0], form.get('body', [''])[0], tuple(
                     svc.IncomingFile(name, raw, 'attachment' if i in attachment_indices else 'convert') for i, (name, raw) in enumerate(uploads)))

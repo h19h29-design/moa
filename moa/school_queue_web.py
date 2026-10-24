@@ -10,6 +10,8 @@ MAX_LISTS = 3
 
 
 def link(context, item=None):
+    if context.get('saved'):
+        return '/review-saved?'+urlencode({'id':context['key'],'item':item or context['item']})
     return '/review-queue?'+urlencode({'queue':context['key'], 'item':item or context['item']})
 
 
@@ -57,6 +59,10 @@ def render(handler, raw):
     if set(query)-{'queue','item','block_page','relation_page'} or any(len(v)!=1 for v in query.values()):
         raise ValueError('Invalid review list query')
     context = _load(handler, query.get('queue',[''])[0], query.get('item',[''])[0])
+    return render_context(handler,context,query)
+
+
+def render_context(handler, context, query):
     current = context['current']
     query.update(revision=[current['revision']])
     from . import school_review as review, school_review_web
@@ -66,11 +72,20 @@ def render(handler, raw):
         # A broken pinned document must not trap the reviewer or silently load
         # another revision. The regular review path remains available from home.
         status = 409 if isinstance(exc,review.Conflict) else (404 if isinstance(exc,LookupError) else 400)
-        return handler._send(handler._shell(banner(context)+'<p>이 고정 문서의 구조를 열 수 없습니다. '
+        return handler._send(handler._shell(banner(context,handler)+'<p>이 고정 문서의 구조를 열 수 없습니다. '
             '수신본과 최신 검수 상태를 목록에서 확인하세요.</p>'),status)
 
 
 def submission(handler, form):
+    if {'saved_id','saved_item'} & set(form):
+        if {'queue_id','queue_item'} & set(form) or not {'saved_id','saved_item'} <= set(form):
+            raise ValueError('Invalid saved list context')
+        from . import school_saved_queue_web
+        context = school_saved_queue_web.load(handler,form['saved_id'][0],form['saved_item'][0])
+        if (form.get('id',[''])[0]!=context['current']['id'] or
+                form.get('revision',[''])[0]!=context['current']['revision']):
+            raise ValueError('Saved list document mismatch')
+        return context
     present = {'queue_id','queue_item'} & set(form)
     if not present: return None
     if len(present) != 2: raise ValueError('Incomplete review list context')
@@ -83,11 +98,14 @@ def submission(handler, form):
 
 def hidden(context):
     if not context: return ''
-    return ('<input type="hidden" name="queue_id" value="'+esc(context['key'])+'">'
-            '<input type="hidden" name="queue_item" value="'+str(context['item'])+'">')
+    prefix = 'saved' if context.get('saved') else 'queue'
+    return ('<input type="hidden" name="'+prefix+'_id" value="'+esc(context['key'])+'">'
+            '<input type="hidden" name="'+prefix+'_item" value="'+str(context['item'])+'">')
 
 
-def banner(context):
+def banner(context, handler):
+    from . import school_saved_queue_web
+    if context.get('saved'): return school_saved_queue_web.banner(handler,context)
     snapshot, item = context['snapshot'], context['item']
     total = len(snapshot['items'])
     query = snapshot['query']
@@ -105,6 +123,7 @@ def banner(context):
         content += '<a data-queue="next" href="'+esc(link(context,item+1))+'">다음 문서</a>'
     else:
         content += '<span>이 페이지 검수 목록 끝 · 다음 페이지는 검색 목록에서 시작하세요.</span>'
-    return (content+'</nav><p id="queue-unsaved" role="status" hidden>저장하지 않은 입력이 있습니다.</p>'
+    return (content+'</nav>'+school_saved_queue_web.save_form(handler,context)+
+            '<p id="queue-unsaved" role="status" hidden>저장하지 않은 입력이 있습니다.</p>'
             '<noscript><p>입력 후 이동하기 전에 저장하세요. JavaScript가 꺼져 있으면 이동 경고가 표시되지 않습니다.</p></noscript>'
             '</section><script src="/static/school-queue.js" defer></script>')

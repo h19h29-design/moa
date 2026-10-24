@@ -215,6 +215,29 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert list(store.db.iterdump())==before_overview
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # Persist the frozen list, then lose the login memory and resume from SQLite.
+    save_form=queue_page.select_one('form[action="/review-queue/save"]')
+    save_fields={x['name']:x.get('value','') for x in save_form.select('input[name]')}
+    save_fields['name']='형식별 합성 재개 목록'
+    saved_status,saved_html,_=fetch(opener,base,'/review-queue/save',fields=save_fields)
+    assert saved_status==200
+    resume_url=BeautifulSoup(saved_html,'html.parser').select_one('[data-queue=current]')['href']
+    assert fetch(opener,base,'/logout',fields={'csrf':csrf})[0]==200
+    resumed_client=client(); login(resumed_client,base)
+    before_resume=list(store.db.iterdump())
+    resume_status,resumed_html,_=fetch(resumed_client,base,resume_url)
+    resumed_page=BeautifulSoup(resumed_html,'html.parser')
+    assert resume_status==200 and '저장한 목록' in resumed_page.get_text()
+    assert resumed_page.select_one('input[name=id]')['value']==ident
+    assert resumed_page.select_one('input[name=revision]')['value']==version['revision']
+    assert list(store.db.iterdump())==before_resume
+    # The two list tables are the only extra DB writes; original/review history
+    # and conversion rows remain exactly as before saving the list.
+    without_lists=lambda rows:[line for line in rows if not line.startswith(
+        ('INSERT INTO "school_review_lists"','INSERT INTO "school_review_list_items"'))]
+    assert without_lists(list(store.db.iterdump()))==without_lists(before_overview)
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)
@@ -249,6 +272,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'restored_content_matches_source':True,'restored_status':'draft',
         'http_overview':overview_status,'overview_draft_and_pinned_links_verified':True,
         'overview_db_objects_cache_unchanged':True,
+        'http_saved_list':saved_status,'http_saved_resume':resume_status,
+        'saved_list_logout_resume_pins_preserved':True,
         'prior_review_rows_and_exports_preserved':True,
         'automatic_analysis_unchanged':True,'conversion_html_and_zip_contents_unchanged':True,
         'http_upload':status,'http_html':html_status,

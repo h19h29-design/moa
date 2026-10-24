@@ -24,9 +24,11 @@
       submitting = true; // The explicit discard confirmation already covered this navigation.
     }
   });
-  for (const form of forms) form.addEventListener('submit', event => {
+  for (const form of [...forms, ...document.querySelectorAll('form[data-queue-navigation]')]) form.addEventListener('submit', event => {
     if (changed().some(other => other !== form) &&
-        !window.confirm('다른 입력란에 저장하지 않은 수정이 있습니다. 이 항목만 저장하고 나머지 입력을 버릴까요?')) {
+        !window.confirm(form.hasAttribute('data-queue-navigation') ?
+          '저장하지 않은 입력이 있습니다. 입력을 버리고 목록·위치만 저장할까요?' :
+          '다른 입력란에 저장하지 않은 수정이 있습니다. 이 항목만 저장하고 나머지 입력을 버릴까요?')) {
       event.preventDefault();
       return;
     }
