@@ -102,6 +102,26 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'base_hash':review['base_hash'],'expected_review':'','action':'block',
         'block_id':block['id'],'block_kind':block['kind'],'text':block['text']+' [합성 검수 메모]',
         'comment':'형식별 격리 시험의 담당자 수정'}
+    # Explicit unfinished input save/recovery uses the same real-format form,
+    # but is not a review event and never changes conversion HTML or originals.
+    from bs4 import BeautifulSoup
+    draft_status,draft_html,_=fetch(opener,base,'/structure-draft/save',fields={**fields,'expected_draft':'','comment':''})
+    assert draft_status==200 and not store.db.execute('SELECT 1 FROM school_structure_reviews').fetchone()
+    draft_id=store.db.execute('SELECT id FROM school_review_drafts').fetchone()[0]
+    assert fetch(opener,base,'/logout',fields={'csrf':csrf})[0]==200
+    opener=client(); csrf=login(opener,base); fields['csrf']=csrf
+    before_input_recovery=list(store.db.iterdump())
+    recovery_status,recovery_html,_=fetch(opener,base,'/structure-draft?id='+draft_id)
+    recovered_page=BeautifulSoup(recovery_html,'html.parser')
+    recovered_form=next(f for f in recovered_page.select('form[action="/structure-review"]')
+        if f.select_one('input[name=block_id][value="'+block['id']+'"]'))
+    assert recovery_status==200 and recovered_page.select_one('#draft-restored')
+    assert recovered_form.select_one('textarea[name=text]').get_text()==fields['text']
+    assert recovered_form.select_one('textarea[name=comment]').get_text()==''
+    assert not recovered_page.select('input[type=checkbox][checked]')
+    assert list(store.db.iterdump())==before_input_recovery
+    assert json.loads(fetch(opener,base,review_url)[1])==review
+    assert fetch(opener,base,'/html?id='+ident)[1]==rendered
     assert fetch(opener,base,'/structure-review',fields=fields)[0] == 200
     changed = json.loads(fetch(opener,base,review_url)[1])
     assert changed['status']=='draft' and changed['original']==analysis
@@ -119,7 +139,6 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     history_status, history_raw, _ = fetch(opener,base,'/structure-history?id='+ident+'&format=json')
     history = json.loads(history_raw)
     assert history_status==200 and [e['action'] for e in history['events']]==['confirm','block']
-    from bs4 import BeautifulSoup
     pinned = '?id='+ident+'&revision='+version['revision']+'&event='+reviewed['latest']['id']
     preview_status, preview, _ = fetch(opener,base,'/review-preview'+pinned)
     reviewed_status, reviewed_html, _ = fetch(opener,base,'/review-html'+pinned+'&download=1')
@@ -244,6 +263,7 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'candidate.html', rendered)
     atomic_write(evidence/'originals.zip', zipped)
     atomic_write(evidence/'reviewed.html', reviewed_html)
+    atomic_write(evidence/'input-recovery.html', recovery_html)
     atomic_write(evidence/'reviewed-originals.zip', reviewed_zip)
     atomic_write(evidence/'comparison.html',comparison_html)
     atomic_write(evidence/'restore-preview.html',restore_preview)
@@ -261,6 +281,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'structure_blocks':len(analysis['blocks']),'structure_relations':len(analysis['relations']),
         'structure_complete':analysis['complete'],'structure_coverage':analysis['files'][0]['coverage'],
         'http_structure':200,'http_review':review_status,'http_history':history_status,
+        'http_input_draft':draft_status,'http_input_recovery':recovery_status,
+        'input_draft_logout_recovery_without_review_or_approval':True,
         'staff_review_status':reviewed['status'],'review_events':len(history['events']),
         'http_reviewed_preview':preview_status,'http_reviewed_html':reviewed_status,'http_reviewed_zip':reviewed_zip_status,
         'reviewed_edit_visible':True,'reviewed_zip_originals_sha256_verified':True,

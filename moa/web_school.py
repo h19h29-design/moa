@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web, school_restore_web
-from . import school_overview, school_overview_web, school_queue_web, school_saved_queue_web
+from . import school_overview, school_overview_web, school_queue_web, school_saved_queue_web, school_draft_web
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -92,7 +92,7 @@ class SchoolHandler(Handler):
         # Individual callers append the CSRF logout form to avoid mixing upload forms.
 
     def _shell(self, content):
-        return self._page('') + ' · <a href="/review-saved">저장한 검수 목록</a><form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
+        return self._page('') + ' · <a href="/review-saved">저장한 검수 목록</a> · <a href="/structure-drafts">내 임시 저장 입력</a><form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
 
     def _home(self, query):
         principal = self._principal()
@@ -174,6 +174,8 @@ class SchoolHandler(Handler):
             if path == '/review-queue': return school_queue_web.render(self,urlsplit(self.path).query)
             if path == '/review-saved': return school_saved_queue_web.render(self,urlsplit(self.path).query)
             if path == '/review-saved/lists': return school_saved_queue_web.directory(self,urlsplit(self.path).query)
+            if path == '/structure-drafts': return school_draft_web.directory(self,urlsplit(self.path).query)
+            if path == '/structure-draft': return school_draft_web.render(self,urlsplit(self.path).query)
             if path == '/structure-restore':
                 return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
             if path == '/structure-compare':
@@ -210,7 +212,7 @@ class SchoolHandler(Handler):
             if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
                 return self._send('Invalid request framing', 400)
             length = int(self.headers.get('Content-Length', '0'))
-            maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else (300_000 if path == '/structure-review' else 200_000)
+            maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else (300_000 if path in ('/structure-review','/structure-draft/save') else 200_000)
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
             data = self.rfile.read(length)
@@ -218,12 +220,13 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move'), max_num_fields=80, errors='strict')
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save'), max_num_fields=80, errors='strict')
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
             if path == '/logout': return self._logout()
             if path == '/structure-review': return school_review_web.submit(self,form)
+            if path == '/structure-draft/save': return school_draft_web.submit(self,form)
             if path in ('/review-queue/save','/review-saved/move'): return school_saved_queue_web.submit(self,path,form)
             if path == '/upload':
                 incoming = svc.IncomingPost(form.get('post_key', [''])[0], form.get('title', [''])[0], form.get('body', [''])[0], tuple(

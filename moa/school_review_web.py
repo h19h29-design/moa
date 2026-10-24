@@ -3,7 +3,7 @@ import json
 from urllib.parse import quote
 
 from . import school_review as review
-from . import school_queue_web
+from . import school_queue_web, school_review_drafts as drafts, school_draft_web
 from .school_review_compare import link as compare_link
 from .school_export_web import link as export_link
 from .school_restore_web import link as restore_link
@@ -20,16 +20,21 @@ def _link(path, ident, revision):
     return path+'?id='+quote(ident,safe='')+'&amp;revision='+quote(revision,safe='')
 
 
-def _form(handler, ident, v, action, queue=None):
+def _form(handler, ident, v, action, queue=None, input_draft=None):
     fields = {'id':ident, 'revision':v['original']['conversion_revision'], 'base_hash':v['base_hash'],
               'expected_review':v['latest']['id'] if v['latest'] else '', 'action':action}
-    return ('<form action="/structure-review" method="post"'+(' data-queue-review' if queue else '')+'>'+
+    if input_draft is not None: fields['expected_draft']=input_draft['expected']
+    return ('<form action="/structure-review" method="post" data-queue-review>'+
             handler._csrf_field()+''.join(_hidden(k,val) for k,val in fields.items())+school_queue_web.hidden(queue))
 
 
-def _reason(button):
-    return ('<label>수정·확인 사유 <textarea name="comment" maxlength="2000" required></textarea></label>'
-            '<button>'+esc(button)+'</button></form>')
+def _reason(button, input_draft=None):
+    content='<label>수정·확인 사유 <textarea name="comment" maxlength="2000" required>'+esc(input_draft['comment'] if input_draft else '')+'</textarea></label>'
+    content+='<button>'+esc(button)+'</button>'
+    if input_draft is not None:
+        content+=' <button formaction="/structure-draft/save" formnovalidate data-draft-save>이 항목 입력 임시 저장</button>'
+        if input_draft['resume']: content+=' <a data-draft-resume href="'+esc(input_draft['resume'])+'">저장된 임시 입력 복구</a>'
+    return content+'</form>'
 
 
 def _page(query, key):
@@ -46,12 +51,46 @@ def _pages(url, key, page, total, size):
     return content+'</p>'
 
 
-def render(handler, ident, query, *, queue=None):
-    v = review.view(handler.store,handler._principal(),ident,
-        revision_id=query.get('revision',[''])[0],event_id=query.get('event',[''])[0])
+def render(handler, ident, query, *, queue=None, draft=None):
+    try:
+        v = review.view(handler.store,handler._principal(),ident,
+            revision_id=query.get('revision',[''])[0],event_id=query.get('event',[''])[0])
+    except (review.Conflict,LookupError,ValueError):
+        if draft: return school_draft_web.read_only(handler,draft)
+        raise
+    if draft:
+        # Validate against the SAME view used to build the form, never reload a
+        # newer base after checking compatibility and silently rebase old input.
+        head=drafts.metadata(handler.store,handler._principal(),ident,draft['conversion_revision'],[draft['target_key']])
+        if (not v['editable'] or v['base_hash']!=draft['base_hash']
+                or (v['latest']['id'] if v['latest'] else '')!=draft['base_review']
+                or head.get(draft['target_key'],{}).get('id')!=draft['id']):
+            return school_draft_web.read_only(handler,draft)
+        query=dict(query); action=draft['payload']['action']
+        if action['kind']=='block':
+            index=next(i for i,b in enumerate(v['analysis']['blocks']) if b['id']==action['block_id'])
+            query['block_page']=[str(index//review.PAGE_SIZE+1)]
+        elif action['kind']=='relation_remove':
+            index=next(i for i,r in enumerate(v['analysis']['relations']) if all(r[k]==val for k,val in action['relation'].items()))
+            query['relation_page']=[str(index//review.PAGE_SIZE+1)]
     if query.get('format',[''])[0]=='json':
         return handler._send(json.dumps(v,ensure_ascii=False),ctype='application/json; charset=utf-8')
     a, original = v['analysis'], v['original']
+    block_page=_page(query,'block_page'); relation_page=_page(query,'relation_page'); size=review.PAGE_SIZE
+    visible_blocks=a['blocks'][(block_page-1)*size:block_page*size]
+    visible_edges=a['relations'][(relation_page-1)*size:relation_page*size]
+    actions=[{'kind':'block','block_id':b['id']} for b in visible_blocks]
+    actions += [{'kind':'relation_remove','relation':{k:r[k] for k in ('kind','source','target')}}
+                for r in visible_edges if r['kind'] in review.RELATION_LABELS]
+    actions += [{'kind':'relation_add'}]
+    installed=drafts.available(handler.store)
+    heads=drafts.metadata(handler.store,handler._principal(),ident,original['conversion_revision'],[drafts.target(x) for x in actions]) if installed and v['editable'] else {}
+    def input_draft(action):
+        if not installed or not v['editable']: return None
+        topic=drafts.target(action); head=heads.get(topic)
+        if draft and draft['target_key']==topic: head=draft
+        return {'expected':head['id'] if head else '', 'resume':school_draft_web.link(head['id'],queue) if head else '',
+                'comment':draft['payload']['comment'] if draft and draft['target_key']==topic else ''}
     revision = original['conversion_revision']; url = _link('/structure-review',ident,revision)
     if v['historical_event']: url += '&amp;event='+quote(v['latest']['id'])
     page_url = esc(school_queue_web.link(queue)) if queue else url
@@ -60,6 +99,13 @@ def render(handler, ident, query, *, queue=None):
         '#school-structure-review input,#school-structure-review select,#school-structure-review textarea'
         '{max-width:100%;box-sizing:border-box}'
         '</style><h1>문서 구조 검수</h1>')+(school_queue_web.banner(queue,handler) if queue else '')
+    if not queue:
+        content+='<p id="queue-unsaved" role="status" hidden>저장하지 않은 입력이 있습니다.</p><script src="/static/school-queue.js" defer></script>'
+    if draft:
+        content+='<section id="draft-restored" class="card"><h2>임시 입력 복구됨</h2><p>임시 #'+str(draft['sequence'])+' · '+esc(draft['created_at'])+' · 아직 정식 검수에 반영되지 않았습니다. 아래 항목을 확인하고 정식 저장하세요. 확인 체크는 복구하지 않습니다.</p></section>'
+    if v['editable']:
+        content+='<p>각 구역·관계의 입력과 사유를 항목별로 임시 저장할 수 있습니다. 버튼을 누른 항목만 저장하며 다른 입력은 자동 저장하지 않습니다. 확인/확인 취소·과거 검수본 복원은 임시 저장 대상이 아닙니다.</p>'
+        if not installed: content+='<p>입력 임시 저장의 명시적 마이그레이션이 필요합니다. 이 조회는 DB를 변경하지 않습니다.</p>'
     content += '<p><strong>'+esc(STATUS[v['status']])+'</strong> · 비공개</p>'
     content += '<p>자동 분석 원본과 담당자 수정본은 별도입니다. 확인은 이 버전의 구조에만 적용되며 공개·원본 변경·기존 HTML 덮어쓰기·학습·운영 승인이 아닙니다.</p>'
     content += '<p>변환 버전 '+esc(revision)+' · <a href="'+_link('/structure',ident,revision)+'">자동 분석 원본</a> · <a href="'+_link('/structure-history',ident,revision)+'">검수 이력</a> · <a href="'+url+'&amp;format=json">수정본·근거 JSON</a> · <a href="/notice?id='+quote(ident)+'">수신본</a></p>'
@@ -81,33 +127,37 @@ def render(handler, ident, query, *, queue=None):
         else:
             content += _form(handler,ident,v,'reopen',queue)+_reason('확인 취소 · 다시 검수')
     content += '<h2>구역 확인·수정</h2><p>종류·추출 텍스트만 수정합니다. 원본 위치·SHA·표 셀·파일 역할은 그대로이며 수정하면 다시 확인이 필요합니다. 원본에 없는 표 구조를 만들지는 않습니다.</p>'
-    block_page = _page(query,'block_page'); size = review.PAGE_SIZE
     content += _pages(page_url,'block_page',block_page,len(a['blocks']),size)
     originals = {b['id']:b for b in original['blocks']}
-    for b in a['blocks'][(block_page-1)*size:block_page*size]:
+    for b in visible_blocks:
+        info=input_draft({'kind':'block','block_id':b['id']})
+        if draft and draft['target_key']==drafts.target({'kind':'block','block_id':b['id']}):
+            b={**b,**{k:draft['payload']['action'][source] for k,source in (('kind','block_kind'),('text','text'))}}
         old = originals[b['id']]
         content += '<section class="card" id="'+esc(b['id'])+'"><h3>'+esc(b['id'])+' · '+esc(review.BLOCK_LABELS[b['kind']])+'</h3>'
         content += '<details><summary>자동 분석 원본 · '+esc(review.BLOCK_LABELS[old['kind']])+'</summary><pre style="white-space:pre-wrap">'+esc(old['text'])+'</pre></details>'
         content += '<p>원본 위치 '+esc(json.dumps(old['locator'],ensure_ascii=False))+' · 자동 근거 '+esc(old['basis'])+'</p>'
         if v['editable']:
-            content += _form(handler,ident,v,'block',queue)+_hidden('block_id',b['id'])+'<label>구역 종류 <select name="block_kind">'
+            content += _form(handler,ident,v,'block',queue,info)+_hidden('block_id',b['id'])+'<label>구역 종류 <select name="block_kind">'
             for key,label in review.BLOCK_LABELS.items():
                 content += '<option value="'+key+'"'+(' selected' if b['kind']==key else '')+'>'+label+'</option>'
-            content += '</select></label><label>수정본 텍스트 (최대 20,000자)<textarea name="text" rows="5" maxlength="20000" required>'+esc(b['text'])+'</textarea></label>'+_reason('구역 수정 저장')
+            content += '</select></label><label>수정본 텍스트 (최대 20,000자)<textarea name="text" rows="5" maxlength="20000" required>'+esc(b['text'])+'</textarea></label>'+_reason('구역 수정 저장',info)
         else: content += '<pre style="white-space:pre-wrap">'+esc(b['text'])+'</pre>'
         content += '</section>'
     content += '<h2>헤더·각주·첨부 관계 수정</h2><p>기존 관계를 제거하거나 같은 수신본의 구역/파일 ID로 관계를 추가하세요. 파일의 안내문·첨부 역할은 이 화면에서 바꾸지 않습니다.</p>'
-    relation_page = _page(query,'relation_page')
     content += _pages(page_url,'relation_page',relation_page,len(a['relations']),size)
-    for edge in a['relations'][(relation_page-1)*size:relation_page*size]:
+    for edge in visible_edges:
         content += '<section class="card"><p>'+esc(review.RELATION_LABELS.get(edge['kind'],edge['kind']))+' · '+esc(edge['source'])+' → '+esc(edge['target'])+' · '+esc(edge['basis'])+' · '+esc(edge['certainty'])+'</p>'
         if v['editable'] and edge['kind'] in review.RELATION_LABELS:
-            content += _form(handler,ident,v,'relation_remove',queue)+''.join(_hidden('relation_'+k,edge[k]) for k in ('kind','source','target'))+_reason('이 관계 제거')
+            info=input_draft({'kind':'relation_remove','relation':{k:edge[k] for k in ('kind','source','target')}})
+            content += _form(handler,ident,v,'relation_remove',queue,info)+''.join(_hidden('relation_'+k,edge[k]) for k in ('kind','source','target'))+_reason('이 관계 제거',info)
         content += '</section>'
     if v['editable']:
-        content += _form(handler,ident,v,'relation_add',queue)+'<label>관계 <select name="relation_kind">'
-        for key,label in review.RELATION_LABELS.items(): content += '<option value="'+key+'">'+esc(label)+'</option>'
-        content += '</select></label><label>출발 ID <input name="relation_source" maxlength="160" required></label><label>대상 ID <input name="relation_target" maxlength="160" required></label>'+_reason('관계 추가')
+        info=input_draft({'kind':'relation_add'})
+        relation=draft['payload']['action']['relation'] if draft and draft['action_kind']=='relation_add' else {}
+        content += _form(handler,ident,v,'relation_add',queue,info)+'<label>관계 <select name="relation_kind">'
+        for key,label in review.RELATION_LABELS.items(): content += '<option value="'+key+'"'+(' selected' if relation.get('kind')==key else '')+'>'+esc(label)+'</option>'
+        content += '</select></label><label>출발 ID <input name="relation_source" maxlength="160" value="'+esc(relation.get('source',''))+'" required></label><label>대상 ID <input name="relation_target" maxlength="160" value="'+esc(relation.get('target',''))+'" required></label>'+_reason('관계 추가',info)
     return handler._send(handler._shell(content+'</div>'))
 
 
@@ -160,7 +210,7 @@ def submit(handler, form):
     # Reject ambiguous duplicate fields and authority/provenance injection.
     allowed = {'csrf','id','revision','base_hash','expected_review','action','comment',
         'block_id','block_kind','text','relation_kind','relation_source','relation_target','acknowledge_warnings',
-        'source_event','acknowledge_restore','queue_id','queue_item','saved_id','saved_item'}
+        'source_event','acknowledge_restore','queue_id','queue_item','saved_id','saved_item','expected_draft'}
     if set(form)-allowed or any(len(values)!=1 for values in form.values()): raise ValueError('Invalid form fields')
     field = lambda k: form.get(k,[''])[0]
     queue = school_queue_web.submission(handler,form)
