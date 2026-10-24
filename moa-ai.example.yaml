@@ -1,0 +1,69 @@
+# MOA AI-assist example config (proposal 2026-10-12).
+# Copy to moa-ai.yaml next to the checkout or point MOA_AI_CONFIG at it.
+# The app reads it only through moa/ai_config.py; cash budget and paid
+# fallbacks are forced to 0/false even if edited here.
+config_version: moa.ai.v1
+mode: assisted_auto
+cash_budget_usd: 0
+source_of_truth: nas_application_api
+storage:
+  nas_data_dir: /volume2/moa/data
+  local_db_over_smb: false
+  corpus_publication: false
+  upload_models_to_hub: false
+providers:
+  muse:
+    model: muse-spark-1.3-contributor-free
+    endpoint: https://opencode.ai/zen/v1/responses
+    secret_name: MOA_MUSE_API_KEY
+    activation: after_verified_free_access_and_data_policy
+    require_exact_model_match: true
+    cloud_policy: allowed_non_sensitive_only
+    training_reuse: unverified_blocked
+    daily_request_cap: 250
+    paid_fallback: false
+  jev:
+    model: typesafe-ai/jev
+    endpoint: https://ai-gateway.vercel.sh/v1/evaluate
+    secret_name: MOA_AI_GATEWAY_API_KEY
+    activation: after_verified_free_credit_eligibility
+    purpose: operational_verification_only
+    training_reuse: prohibited
+    training_sample_selection: prohibited
+    model_promotion_use: prohibited
+    daily_request_cap: 80
+    monthly_moa_free_credit_cap_usd: 1.0
+    max_fraction_verified_remaining_free_credit: 0.8
+    recharge: false
+    use_purchased_credits: false
+    byok_fallback: false
+    paid_fallback: false
+  laya:
+    model: convaiinnovations/laya-multilingual
+    device_preference: mps
+    max_len: 1024
+    vision: false
+conversion:
+  daily_new_document_cap: 100
+  pilot_batches: [5, 20, 100]
+  automatic_repair_max_rounds: 2
+  unknown_source_action: preserve_original
+human_review:
+  initial_representative_document_target: 30
+  daily_display_cap: 3
+  random_full_audits: 1
+  maximum_exception_reviews: 2
+  excess_action: preserve_original_or_hold
+training:
+  minimum_new_eligible_decisions: 500
+  minimum_source_groups: 30
+  maximum_runs_per_week: 2
+  allowed_label_origins: [human_independent, deterministic_oracle]
+  forbidden_lineage: [jev_output, jev_label, jev_selected, laya_self_label]
+network:
+  preferred: openssh_over_tailscale
+  mini_broker_port_candidate: 8781
+  macbook_tunnel_port_candidate: 18781
+runtime:
+  verify_lease_seconds: 600
+  heartbeat_seconds: 30

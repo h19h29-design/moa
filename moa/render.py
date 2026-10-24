@@ -26,7 +26,11 @@ def _grid(table: dict) -> list:
 
 def _raw_table(table: dict) -> str:
     """The complete table, merged cells preserved. Always available as fallback."""
-    out = ['<table class="moa-raw"><tbody>']
+    # Korean may wrap between every character. Keep wide/merged tables readable
+    # inside their existing horizontal scroll container instead of squeezing all
+    # columns into the phone width. Content and merge relationships stay intact.
+    minimum = max(1, min(200, int(table.get('cols', 1)))) * 80
+    out = ['<table class="moa-raw" style="min-width:%dpx"><tbody>' % minimum]
     for row in _grid(table):
         out.append('<tr>')
         for cell in row:
@@ -77,7 +81,8 @@ def _grade_cards(table: dict) -> str:
                         '<div class="moa-v">%s</div></div>'
                         % (_esc(header[i] if i < len(header) else ''), _esc(c['text']))
                         for i, c in enumerate(cells[1:], 1))
-        groups.append('<div class="moa-card"><h4>%s</h4>%s</div>' % (_esc(title), pairs))
+        groups.append('<div class="moa-card"><small class="moa-first-label">%s</small>'
+                      '<h4 class="moa-row-title">%s</h4>%s</div>' % (_esc(header[0] if header else ''), _esc(title), pairs))
     return '<div class="moa-cards">' + ''.join(groups) + '</div>' if groups else ''
 
 
@@ -101,7 +106,8 @@ CSS = ('body{font-family:system-ui;margin:0;padding:12px;background:#f6f7f9;colo
        '.moa-kv{display:flex;gap:8px;background:#fff;border-radius:10px;padding:10px 12px;'
        'margin-bottom:8px;box-shadow:0 1px 3px rgba(0,0,0,.08)}'
        '.moa-k{flex:0 0 34%;font-weight:600;color:#456}'
-       '.moa-v{flex:1;white-space:pre-wrap;overflow-wrap:anywhere}'
+       '.moa-v{flex:1;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}'
+       '.moa-k,.moa-card h4{overflow-wrap:anywhere}.moa-source-block{min-width:0}'
        '.moa-timeline{margin:0;background:#fff;border-radius:10px;'
        'padding:12px 12px 12px 32px}.moa-timeline li{margin:6px 0}'
        '.moa-when{font-weight:600;color:#0a5;margin-right:8px}'
@@ -122,6 +128,9 @@ def render_mobile(table: dict, layout: str) -> str:
     """
     if not table.get('cells'):
         return '<p class="moa-note">추출된 표가 없습니다. 원문을 확인하세요.</p>'
+    # Card grouping cannot infer multi-level/merged header relationships safely.
+    if any(c.get('rowspan', 1) > 1 or c.get('colspan', 1) > 1 for c in table['cells']):
+        return '<p class="moa-note">병합 관계를 유지한 원문 표입니다. 필요하면 좌우로 스크롤하세요.</p><div class="moa-scroll">' + _raw_table(table) + '</div>'
     body = ''
     if layout == 'key_value_cards':
         body = _key_value(table)

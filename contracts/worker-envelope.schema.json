@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MOA worker envelope v1",
+  "description": "Envelope validation only. Domain validation, provenance, authorization and digest checks are mandatory separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "message_type",
+    "job_id",
+    "job_kind",
+    "idempotency_key",
+    "lease_id",
+    "fencing_token",
+    "input_sha256",
+    "source_revision",
+    "render_revision",
+    "rubric_revision",
+    "payload"
+  ],
+  "properties": {
+    "contract_version": {"const": "moa.worker.v1"},
+    "message_type": {"enum": ["job", "result"]},
+    "job_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "job_kind": {"enum": ["verify", "train", "validate_candidate"]},
+    "idempotency_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "lease_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "fencing_token": {"type": "integer", "minimum": 1},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_revision": {"type": "string", "minLength": 1, "maxLength": 200},
+    "render_revision": {"type": "string", "minLength": 1, "maxLength": 200},
+    "rubric_revision": {"type": "string", "minLength": 1, "maxLength": 200},
+    "example_only": {"type": "boolean", "default": false},
+    "payload": {"type": "object"}
+  }
+}
