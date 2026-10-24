@@ -101,7 +101,11 @@ def create(store, principal, ident, snapshot, *, name, cursor):
     if type(cursor) is not int or not 1<=cursor<=len(items)<=20: raise ValueError('Invalid list size/position')
     for item in items:
         if set(item)!={'id','revision','title'}: raise ValueError('Invalid list item')
-        text(item['title'],300)
+        # Keep the existing intake title contract (including newlines/tabs).
+        # These pinned titles are escaped on render, not treated as list names.
+        if not isinstance(item['title'],str) or len(item['title'])>300:
+            raise ValueError('Invalid document title')
+        item['title'].encode('utf-8')
     try:
         store.db.execute('BEGIN IMMEDIATE')
         svc.require_member(store,principal,write=True)

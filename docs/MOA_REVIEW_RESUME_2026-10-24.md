@@ -82,8 +82,8 @@ NAS 운영 DB에는 접속하거나 적용하지 않았다.
 확인한 뒤 구현했다. 기본 흐름·이전 연속 검수·학교 서비스/검수 관련 73개가 통과했다.
 저장 기능·실제 형식 경로의 후속 26개도 통과했다.
 
-- 최종 전체 회귀: **1,517 통과 / 16 skip / 실패 0**, 146.97초 (`full.xml`).
-  신규 저장 목록 테스트는 동시 연결 충돌 검사를 포함해 23개다.
+- 최종 전체 회귀: **1,518 통과 / 16 skip / 실패 0**, 147.67초 (`full-final.xml`).
+  신규 저장 목록 테스트는 동시 연결 충돌 검사를 포함해 24개다.
   기존 선택적 검사 skip을 해제하려고 모델/맥북 작업이나 의존성 설치를 하지 않았다.
 - `compileall -q moa`, `node --check moa/school_queue_ui.js`,
   `sh -n scripts/install-nas.sh`(구문 검사만), `git diff --check` 통과.
@@ -92,6 +92,9 @@ NAS 운영 DB에는 접속하거나 적용하지 않았다.
   중복 저장·GET 무변경·오래된 탭·별도 연결의 동시 위치 저장을 다룬다.
 - CSRF·Origin·중복/위조 필드·문서/변환 불일치·잘못된 UTF-8·이름 XSS·페이지/20건 경계,
   정정·재변환·실패·손상 문서, 원본/추출 bytes·mtime·변환 payload·이전 감사 보존을 검사한다.
+- 기존 수신이 허용하는 줄바꿈·탭 포함 제목의 목록 저장이 HTTP 400으로 실패하는 것을
+  별도 테스트로 재현한 뒤 수정했다 (`title-red.xml` → `title-green.xml`, 저장 기능 24개 통과).
+  고정 문서 제목을 원형 그대로 보존하고 출력 시 escape하며, 새 목록 이름의 제어 문자 제한은 유지한다.
 - 실제 HWP(기취득 비공개 fixture)·합성 HWPX·DOCX·텍스트 PDF 모두 실제 parser를 사용했다.
   업로드 → 역할/변환 → HTML/원본 ZIP → 검수/비교/복원 → 현황/연속 목록 →
   목록 저장 → 로그아웃/재로그인 → 같은 수신/변환 재개를 실제 HTTP로 검증했다.
@@ -103,8 +106,9 @@ NAS 운영 DB에는 접속하거나 적용하지 않았다.
 다음/이전과 위치 저장 → 로그아웃/재로그인 → 저장 목록 → 두 번째 문서에서 재개.
 
 Browser plugin/skill이 없어 기존 Playwright 1.62.1과 설치된 Chrome을 사용했다.
-합성 loopback 서버 `http://127.0.0.1:49254`에서 1280×900 및 390×844를 확인했고,
+최종 합성 loopback 서버 `http://127.0.0.1:52261`에서 1280×900 및 390×844를 확인했고,
 검증 후 이 작업이 실행한 서버·전용 브라우저만 정상 종료했다.
+최종 브라우저 검증도 줄바꿈·탭이 있는 기존 계약의 문서 제목으로 전체 흐름을 다시 통과했다.
 
 | 확인 | 결과 |
 |---|---|
@@ -130,10 +134,10 @@ Browser plugin/skill이 없어 기존 Playwright 1.62.1과 설치된 Chrome을 �
   기존 분리 위험이 해소됐다는 의미가 아니다. 새 오류 시 내부 대체 경로로 우회하지 않는다.
 - SQLite·사전 마이그레이션 백업·pytest/JUnit·임시/Python 캐시·실제 형식 HTML/ZIP·브라우저 프로필/화면:
   `/Volumes/KIOXIA-2TB/Cache/MOA/school-review-resume-20261024`
-  - `red.xml`, `green1.xml`, `saved-suite1.xml`, `saved-suite2.xml`
-  - `full/`, `full.xml`, `formats-full/{hwp,hwpx,pdf,docx}/`
-  - `browser-data/`, `BROWSER_RESULT.json`, `BROWSER_PRESERVATION.json`
-  - `screenshots/{desktop-saved,mobile-directory,mobile-resumed}.png`
+  - `red.xml`, `green1.xml`, `saved-suite1.xml`, `saved-suite2.xml`, `title-red.xml`, `title-green.xml`
+  - `full-final/`, `full-final.xml`, `formats-final/{hwp,hwpx,pdf,docx}/` (이전 검증 결과도 보존)
+  - `final/browser-data/`, `final/BROWSER_RESULT.json`, `final/BROWSER_PRESERVATION.json`
+  - `final/screenshots/{desktop-saved,mobile-directory,mobile-resumed}.png`
 - 기존 `.venv312` 재사용, 의존성 재설치·모델/원문 다운로드 없음.
 - NAS `/volume2/moa/app`, `/volume2/moa/data`, 운영 DB·서비스·원본에는 접속/쓰기/배포하지 않았다.
 - 변경 파일: `moa/school_saved_queue.py`, `moa/school_saved_queue_web.py`,

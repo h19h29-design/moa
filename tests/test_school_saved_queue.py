@@ -331,3 +331,15 @@ def test_concurrent_checkpoints_from_two_connections_have_one_winner(school_web)
         for thread in threads: thread.join(timeout=10); assert not thread.is_alive()
         assert sorted(results)==['conflict','saved']
         assert saved.get(s,principal,ident)['version']==2
+
+
+def test_existing_multiline_document_title_is_preserved_when_saving(school_web):
+    _,s,base=school_web
+    a=client(); login(a,base); principal=svc.Principal('A','a')
+    title='합성 행사\n둘째 줄\t안내'
+    receipt=svc.upload(s,principal,svc.IncomingPost('multiline',title,'<p>합성 본문</p>'))
+    svc.request_conversion(s,principal,receipt.version_id); assert svc.process_conversions(s)==['done']
+    doc,_=save_list(a,base,start(a,base)[0])
+    ident=parse_qs(urlsplit(doc.select_one('[data-queue=current]')['href']).query)['id'][0]
+    assert saved.get(s,principal,ident)['snapshot']['items'][0]['title']==title
+    assert s.db.execute('SELECT title FROM school_service_posts WHERE id=?',(receipt.post_id,)).fetchone()[0]==title
