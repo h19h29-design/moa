@@ -47,7 +47,7 @@ def render(result):
         content += '<p>'+label+'<strong data-count="'+status+'">'+str(result['counts'][status])+'</strong></p>'
     content += ('</div><p>최신 수신본·변환본에 저장된 검수 상태입니다. 위 집계는 검색 조건과 무관한 학교 전체 기준이며, '
                 '확인 완료는 공개 승인이나 원본 무결성 재검사를 뜻하지 않습니다.</p>')
-    content += '<p><a data-action="confirmed-export" href="/confirmed-export">확인 완료본 선택·묶음 다운로드</a></p>'
+    content += '<p><a data-action="confirmed-export" href="/confirmed-export">확인 완료본 선택·묶음 다운로드</a> · <a data-action="confirmed-export-saved" href="/confirmed-export/saved">저장한 묶음·이어서 다운로드</a></p>'
     if result['migration_required']:
         content += '<p>검수 이력 기능의 명시적 마이그레이션이 필요합니다. 이 화면에서는 DB를 변경하지 않습니다.</p>'
     content += '<form method="get" action="/" class="filters"><label>제목 검색<input type="search" name="q" maxlength="200" value="'+esc(result['q'])+'" placeholder="제목 일부 입력"></label>'

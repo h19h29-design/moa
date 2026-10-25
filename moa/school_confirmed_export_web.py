@@ -1,4 +1,4 @@
-"""Session-bound selection, explicit preview and private confirmed batch download."""
+"""Version-pinned selection, explicit preview and private confirmed batch download."""
 import json
 import re
 import secrets
@@ -31,6 +31,7 @@ def directory(handler, raw):
     result=overview.overview(handler.store,handler._principal(),**overview_query(urlencode({**{k:v[0] for k,v in q.items()},'status':'confirmed'})))
     content=STYLE+'<section class="comparison" id="confirmed-export"><h1>확인 완료본 묶음 다운로드</h1>'
     content+='<p>학교의 최신 확인 완료본을 최대 10건 선택하세요. 원본 합계 64MiB, HTML·근거를 포함한 묶음 내용 96MiB로 제한합니다. 원본·검수 이력은 보존합니다.</p>'
+    content+='<p><a data-export-saved-directory href="/confirmed-export/saved">저장한 묶음·이어서 다운로드</a></p>'
     content+='<form method="get" action="/confirmed-export"><label>제목 검색<input type="search" name="q" maxlength="200" value="'+esc(result['q'])+'"></label><button>검색</button></form>'
     content+='<p data-export-count>확인 완료 '+str(result['total'])+'건 · '+str(result['page'])+' / '+str(result['pages'])+'페이지</p>'
     content+='<form method="post" action="/confirmed-export/prepare" data-export-selection>'+handler._csrf_field()
@@ -53,7 +54,13 @@ def render(handler, raw):
     q=query(raw,{'bundle'})
     if set(q)!={'bundle'}: raise ValueError('Prepared bundle required')
     key=q['bundle'][0];data=_load(handler,key)
-    content=STYLE+'<section class="comparison" id="confirmed-export-preview"><h1>확인 완료본 묶음 준비 결과</h1>'
+    return preview(handler,data,key)
+
+
+def preview(handler, data, key, *, saved_row=None):
+    content=STYLE+'<section class="comparison" id="confirmed-export-preview"><h1>'+('저장한 확인 완료본 묶음' if saved_row else '확인 완료본 묶음 준비 결과')+'</h1>'
+    if saved_row:
+        content+='<h2 data-export-saved-name>'+esc(saved_row['name'])+'</h2><p>목록 저장 '+esc(saved_row['created_at'])+' · 내 계정 전용</p>'
     content+='<p data-export-summary>'+str(len(data['documents']))+'건 · 원본 합계 '+str(data['original_bytes'])+'바이트 · 비공개</p>'
     content+='<p class="compare-note">표시한 수신·변환·검수 버전만 내려받습니다. 준비 뒤 정정·재변환·검수 수정·확인 해제가 있으면 전체 다운로드를 중단합니다. 공개 승인은 포함하지 않습니다.</p>'
     for d in data['documents']:
@@ -62,10 +69,16 @@ def render(handler, raw):
         content+='<p>파일 '+str(d['file_count'])+'개 · 경고 '+str(len(d['warnings']))+'개 · '+('분석기가 보고한 완전성 충족' if d['analysis_complete'] else '일부 미확정·누락 있음')+'</p>'
         content+='<a href="'+esc(check_link(d['notice_version'],d['conversion_revision'],e['id']))+'">고정된 확인 기록·HTML 대조</a></article>'
     content+='<p>ZIP에는 목록 HTML·근거 JSON과 문서별 수정 HTML·원본 파일이 포함됩니다. 경고·미확정 범위도 그대로 포함합니다.</p>'
-    content+='<p>이 준비 목록은 현재 로그인에서만 유지됩니다. 로그아웃·서버 재시작·준비 목록 4개 초과 시 다시 선택하세요.</p>'
-    content+='<form action="/confirmed-export/download" method="post" data-export-download>'+handler._csrf_field()+_hidden('bundle',key)
+    if saved_row:
+        content+='<p>저장한 목록은 재로그인·서버 재시작 후에도 유지됩니다. 다운로드마다 같은 버전을 재검사하며 확인란은 직접 다시 선택해야 합니다.</p>'
+    else:
+        from .school_confirmed_export_saved_web import save_form
+        content+=save_form(handler,key)
+        content+='<p>저장하지 않은 준비 목록은 현재 로그인에서만 유지됩니다. 로그아웃·서버 재시작·준비 목록 4개 초과 시 다시 선택하세요.</p>'
+    endpoint='/confirmed-export/saved/download' if saved_row else '/confirmed-export/download'
+    content+='<form action="'+endpoint+'" method="post" data-export-download>'+handler._csrf_field()+_hidden('id' if saved_row else 'bundle',key)
     content+='<label><input type="checkbox" name="acknowledge" value="yes" required> 포함 문서·검수 시점·남은 경고를 확인했습니다.</label><button>확인한 묶음 ZIP 다운로드</button></form>'
-    return handler._send(handler._shell(content+'<p><a href="/confirmed-export">다시 선택</a> · <a href="/#review-overview">학교 현황으로</a></p></section>'))
+    return handler._send(handler._shell(content+'<p><a href="/confirmed-export/saved">저장한 묶음 목록</a> · <a href="/confirmed-export">다시 선택</a> · <a href="/#review-overview">학교 현황으로</a></p></section>'))
 
 
 def submit(handler, path, form):
@@ -86,6 +99,9 @@ def submit(handler, path, form):
 
 def dispatch(handler, path, *, raw=None, form=None):
     try:
+        if path in ('/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/save','/confirmed-export/saved/download'):
+            from . import school_confirmed_export_saved_web
+            return school_confirmed_export_saved_web.dispatch(handler,path,raw=raw,form=form)
         if form is not None: return submit(handler,path,form)
         return directory(handler,raw) if path=='/confirmed-export' else render(handler,raw)
     except batch.Limit as error:

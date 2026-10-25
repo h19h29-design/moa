@@ -213,7 +213,7 @@ def test_long_identical_and_whitespace_only_text_remain_exact_and_bounded(school
 
 def test_missing_draft_schema_is_not_automatically_installed(school_web):
     _,s,base=school_web; a=client(); login(a,base)
-    s.db.executescript('DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
+    s.db.executescript('DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
     before=list(s.db.iterdump())
     assert fetch(a,base,path('0'*32))[0]==409
     assert list(s.db.iterdump())==before

@@ -389,6 +389,37 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert fetch(resumed_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # Stage 18 persists only the pinned list. Logout/fresh-login recovery must
+    # download byte-identical confirmed content without changing prior rows.
+    export_save=BeautifulSoup(batch_preview,'html.parser').select_one('[data-export-save]')
+    assert export_save is not None
+    export_fields={e['name']:e.get('value','') for e in export_save.select('input[name]')}
+    export_fields['name']='형식별 확인 완료본 묶음'
+    saved_export_status,saved_export_preview,_=fetch(resumed_client,base,'/confirmed-export/save',fields=export_fields)
+    assert saved_export_status==200
+    saved_form=BeautifulSoup(saved_export_preview,'html.parser').select_one('[data-export-download]')
+    saved_ident=saved_form.select_one('[name=id]')['value']
+    exclude_exports=lambda rows:[r for r in rows if not r.startswith((
+        'INSERT INTO "school_confirmed_export_lists"','INSERT INTO "school_confirmed_export_items"'))]
+    assert exclude_exports(list(store.db.iterdump()))==exclude_exports(batch_before)
+    saved_rows=list(store.db.iterdump())
+    assert fetch(resumed_client,base,'/logout',fields={'csrf':resumed_csrf})[0]==200
+    export_client=client();export_csrf=login(export_client,base)
+    saved_directory=BeautifulSoup(fetch(export_client,base,'/confirmed-export/saved')[1],'html.parser')
+    saved_link=saved_directory.select_one('[data-export-saved-resume]')['href']
+    assert saved_ident in saved_link
+    resume_export_status,resume_export_preview,_=fetch(export_client,base,saved_link)
+    assert resume_export_status==200
+    resume_form=BeautifulSoup(resume_export_preview,'html.parser').select_one('[data-export-download]')
+    assert not resume_form.select_one('[name=acknowledge]').has_attr('checked')
+    resume_fields={e['name']:e.get('value','') for e in resume_form.select('input[name]')}
+    resume_fields['acknowledge']='yes';assert resume_fields['csrf']==export_csrf
+    resume_zip_status,resume_zip,_=fetch(export_client,base,'/confirmed-export/saved/download',fields=resume_fields)
+    assert resume_zip_status==200 and resume_zip==batch_zip and list(store.db.iterdump())==saved_rows
+    assert fetch(export_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert fetch(export_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)
@@ -401,6 +432,9 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'final-confirmed.html',final_receipt)
     atomic_write(evidence/'confirmed-batch-preview.html',batch_preview)
     atomic_write(evidence/'confirmed-batch.zip',batch_zip)
+    atomic_write(evidence/'saved-batch-preview.html',saved_export_preview)
+    atomic_write(evidence/'resumed-batch-preview.html',resume_export_preview)
+    atomic_write(evidence/'resumed-batch.zip',resume_zip)
     atomic_write(evidence/'comparison.html',comparison_html)
     atomic_write(evidence/'restore-preview.html',restore_preview)
     atomic_write(evidence/'restored.html',restored_html)
@@ -423,6 +457,9 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'http_reviewed_preview':preview_status,'http_reviewed_html':reviewed_status,'http_reviewed_zip':reviewed_zip_status,
         'http_confirmed_batch_prepare':batch_status,'http_confirmed_batch_zip':batch_zip_status,
         'confirmed_batch_pins_originals_and_warnings_verified':True,'confirmed_batch_db_and_files_unchanged':True,
+        'http_saved_export':saved_export_status,'http_saved_export_resume':resume_export_status,
+        'http_saved_export_zip':resume_zip_status,'saved_export_logout_recovery_byte_identical':True,
+        'saved_export_only_list_rows_appended':True,'saved_export_originals_history_preserved':True,
         'reviewed_edit_visible':True,'reviewed_zip_originals_sha256_verified':True,
         'http_comparison':comparison_status,'http_comparison_json':json_status,
         'comparison_changed_blocks':comparison['summary']['changed_blocks'],
