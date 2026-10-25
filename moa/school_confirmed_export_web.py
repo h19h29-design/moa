@@ -1,0 +1,94 @@
+"""Session-bound selection, explicit preview and private confirmed batch download."""
+import json
+import re
+import secrets
+from urllib.parse import urlencode
+
+from . import school_confirmed_export as batch, school_overview as overview
+from . import school_review as review
+from .school_overview_web import query as overview_query
+from .school_saved_queue_web import query
+from .school_review_check_web import link as check_link
+from .school_review_web import _hidden
+from .school_compare_web import STYLE
+from .core import encode
+from .web import esc
+
+MAX_PREPARED = 4
+
+
+def _load(handler, key):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{24}',key): raise ValueError('Invalid prepared bundle')
+    p=handler._principal()
+    item=handler._session().get('school_confirmed_exports',{}).get(key)
+    if not item or (item['school'],item['subject'])!=(p.school,p.subject):
+        raise LookupError('Prepared bundle not found')
+    return batch.prepare(handler.store,p,item['pins'],expected=True)
+
+
+def directory(handler, raw):
+    q=query(raw,{'q','page'})
+    result=overview.overview(handler.store,handler._principal(),**overview_query(urlencode({**{k:v[0] for k,v in q.items()},'status':'confirmed'})))
+    content=STYLE+'<section class="comparison" id="confirmed-export"><h1>확인 완료본 묶음 다운로드</h1>'
+    content+='<p>학교의 최신 확인 완료본을 최대 10건 선택하세요. 원본 합계 64MiB, HTML·근거를 포함한 묶음 내용 96MiB로 제한합니다. 원본·검수 이력은 보존합니다.</p>'
+    content+='<form method="get" action="/confirmed-export"><label>제목 검색<input type="search" name="q" maxlength="200" value="'+esc(result['q'])+'"></label><button>검색</button></form>'
+    content+='<p data-export-count>확인 완료 '+str(result['total'])+'건 · '+str(result['page'])+' / '+str(result['pages'])+'페이지</p>'
+    content+='<form method="post" action="/confirmed-export/prepare" data-export-selection>'+handler._csrf_field()
+    offered=0
+    for row in result['rows']:
+        if not row['structure_available'] or row['state']!='candidate': continue
+        pin={'id':row['notice_version'],'revision':row['revision'],'event':row['review_id']};offered+=1
+        content+='<article class="card"><label><input type="checkbox" name="item" value="'+esc(encode(pin))+'"> '+esc(row['title'])+'</label>'
+        content+='<p>수신 #'+str(row['sequence'])+' · 검수 #'+str(row['review_sequence'])+' · '+esc(row['review_actor'])+' · '+esc(row['review_at'])+'</p>'
+        content+='<a href="'+esc(check_link(pin['id'],pin['revision'],pin['event']))+'">이 확인 기록·HTML 보기</a></article>'
+    if offered: content+='<button>선택한 확인 완료본 준비</button>'
+    else: content+='<p>이 페이지에 내려받을 수 있는 확인 완료본이 없습니다. 문서 구조 검수와 확인 상태를 먼저 확인하세요.</p>'
+    content+='</form><nav aria-label="확인 완료본 페이지">'
+    for number,label in ((result['page']-1,'이전 페이지'),(result['page']+1,'다음 페이지')):
+        if 1<=number<=result['pages']: content+='<a href="/confirmed-export?'+esc(urlencode({'q':result['q'],'page':number}))+'">'+label+'</a> · '
+    return handler._send(handler._shell(content+'</nav><p><a href="/#review-overview">학교 현황으로</a></p></section>'))
+
+
+def render(handler, raw):
+    q=query(raw,{'bundle'})
+    if set(q)!={'bundle'}: raise ValueError('Prepared bundle required')
+    key=q['bundle'][0];data=_load(handler,key)
+    content=STYLE+'<section class="comparison" id="confirmed-export-preview"><h1>확인 완료본 묶음 준비 결과</h1>'
+    content+='<p data-export-summary>'+str(len(data['documents']))+'건 · 원본 합계 '+str(data['original_bytes'])+'바이트 · 비공개</p>'
+    content+='<p class="compare-note">표시한 수신·변환·검수 버전만 내려받습니다. 준비 뒤 정정·재변환·검수 수정·확인 해제가 있으면 전체 다운로드를 중단합니다. 공개 승인은 포함하지 않습니다.</p>'
+    for d in data['documents']:
+        e=d['review']
+        content+='<article class="card" data-export-document><h2>'+esc(d['title'])+'</h2><p>수신 #'+str(d['receiving_sequence'])+' · 검수 #'+str(e['sequence'])+' · '+esc(e['actor'])+' · '+esc(e['created_at'])+'</p>'
+        content+='<p>파일 '+str(d['file_count'])+'개 · 경고 '+str(len(d['warnings']))+'개 · '+('분석기가 보고한 완전성 충족' if d['analysis_complete'] else '일부 미확정·누락 있음')+'</p>'
+        content+='<a href="'+esc(check_link(d['notice_version'],d['conversion_revision'],e['id']))+'">고정된 확인 기록·HTML 대조</a></article>'
+    content+='<p>ZIP에는 목록 HTML·근거 JSON과 문서별 수정 HTML·원본 파일이 포함됩니다. 경고·미확정 범위도 그대로 포함합니다.</p>'
+    content+='<p>이 준비 목록은 현재 로그인에서만 유지됩니다. 로그아웃·서버 재시작·준비 목록 4개 초과 시 다시 선택하세요.</p>'
+    content+='<form action="/confirmed-export/download" method="post" data-export-download>'+handler._csrf_field()+_hidden('bundle',key)
+    content+='<label><input type="checkbox" name="acknowledge" value="yes" required> 포함 문서·검수 시점·남은 경고를 확인했습니다.</label><button>확인한 묶음 ZIP 다운로드</button></form>'
+    return handler._send(handler._shell(content+'<p><a href="/confirmed-export">다시 선택</a> · <a href="/#review-overview">학교 현황으로</a></p></section>'))
+
+
+def submit(handler, path, form):
+    if path=='/confirmed-export/prepare':
+        if set(form)!={'csrf','item'} or len(form['csrf'])!=1 or not 1<=len(form['item'])<=batch.MAX_NOTICES:
+            raise ValueError('Invalid selection fields')
+        items=[json.loads(value) for value in form['item']]
+        data=batch.prepare(handler.store,handler._principal(),items)
+        p=handler._principal();entries=handler._session().setdefault('school_confirmed_exports',{})
+        while len(entries)>=MAX_PREPARED: entries.pop(next(iter(entries)))
+        key=secrets.token_urlsafe(18);entries[key]={'school':p.school,'subject':p.subject,'pins':data['pins']}
+        return handler._redirect('/confirmed-export/preview?'+urlencode({'bundle':key}))
+    if set(form)!={'csrf','bundle','acknowledge'} or any(len(v)!=1 for v in form.values()) or form['acknowledge'][0]!='yes':
+        raise ValueError('Explicit batch download acknowledgement required')
+    data=_load(handler,form['bundle'][0])
+    return handler._send_bytes(batch.bundle(handler.store,handler._principal(),data['pins']),'confirmed-notices.zip','application/zip')
+
+
+def dispatch(handler, path, *, raw=None, form=None):
+    try:
+        if form is not None: return submit(handler,path,form)
+        return directory(handler,raw) if path=='/confirmed-export' else render(handler,raw)
+    except batch.Limit as error:
+        return handler._send(handler._shell('<h1>문서를 나눠 선택하세요</h1><p>'+esc(str(error))+'</p><a href="/confirmed-export">확인 완료본 다시 선택</a>'),400)
+    except review.Conflict:
+        return handler._send(handler._shell('<h1>묶음 준비 상태를 다시 확인하세요</h1><p>선택한 수신·변환·검수 버전 또는 원본 무결성이 달라졌습니다. 최신 확인 상태와 원본을 대조한 뒤 다시 선택하세요. 일부 문서만 내려받지 않습니다.</p><a href="/confirmed-export">확인 완료본 다시 선택</a>'),409)

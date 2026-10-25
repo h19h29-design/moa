@@ -57,6 +57,7 @@ def render(handler, raw):
         for reason in data['reasons']: content+='<li data-final-reason="'+reason+'">'+REASONS[reason]+'</li>'
         content+='</ul></section>'
     content+='<p><a href="'+esc('/structure-review?'+urlencode({'id':ident,'revision':revision}))+'">최신 검수 화면으로</a> · <a href="'+esc('/structure-history?'+urlencode({'id':ident,'revision':revision}))+'">검수 이력</a> · <a href="/structure-drafts">내 임시 저장 입력</a></p></section>'
+    if v['status']=='confirmed': content+='<p><a data-confirmed-export href="/confirmed-export">확인 완료본 선택·묶음 다운로드</a></p>'
     return handler._send(handler._shell(content))
 
 

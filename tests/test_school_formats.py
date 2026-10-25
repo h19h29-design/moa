@@ -250,7 +250,7 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert saved_status==200
     resume_url=BeautifulSoup(saved_html,'html.parser').select_one('[data-queue=current]')['href']
     assert fetch(opener,base,'/logout',fields={'csrf':csrf})[0]==200
-    resumed_client=client(); login(resumed_client,base)
+    resumed_client=client(); resumed_csrf=login(resumed_client,base)
     before_resume=list(store.db.iterdump())
     resume_status,resumed_html,_=fetch(resumed_client,base,resume_url)
     resumed_page=BeautifulSoup(resumed_html,'html.parser')
@@ -360,6 +360,35 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert fetch(resumed_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # Stage 17 downloads the exact current confirmation without changing rows,
+    # old exports, automatic analysis, originals or the prior review audit.
+    batch_before=list(store.db.iterdump())
+    batch_item={'id':ident,'revision':version['revision'],'event':current['latest']['id']}
+    batch_status,batch_preview,_=fetch(resumed_client,base,'/confirmed-export/prepare',fields={
+        'csrf':resumed_csrf,'item':json.dumps(batch_item)})
+    batch_form=BeautifulSoup(batch_preview,'html.parser').select_one('[data-export-download]')
+    assert batch_status==200 and batch_form is not None
+    batch_fields={e['name']:e.get('value','') for e in batch_form.select('input[name]')}
+    batch_fields['acknowledge']='yes'
+    batch_zip_status,batch_zip,batch_headers=fetch(resumed_client,base,'/confirmed-export/download',fields=batch_fields)
+    assert batch_zip_status==200 and batch_headers['Content-Type']=='application/zip'
+    with zipfile.ZipFile(io.BytesIO(batch_zip)) as z:
+        root_manifest=json.loads(z.read('manifest.json'));assert len(root_manifest['documents'])==1
+        document=root_manifest['documents'][0];prefix=document['path']
+        assert document['review']['id']==batch_item['event'] and document['review']['status']=='confirmed'
+        assert document['warnings']==analysis['warnings'] and document['analysis_complete'] is False
+        assert root_manifest['private'] is True and root_manifest['publication_approved'] is False
+        assert root_manifest['index_sha256']==digest(z.read('index.html'))
+        document_manifest=json.loads(z.read(prefix+'manifest.json'))
+        assert document_manifest['html_sha256']==digest(z.read(prefix+'index.html'))
+        assert '다음 임시 입력' in z.read(prefix+'index.html').decode()
+        assert original_sha in {f['sha256'] for f in document_manifest['originals']}
+        for f in document_manifest['originals']:assert digest(z.read(prefix+f['path']))==f['sha256']
+    assert list(store.db.iterdump())==batch_before
+    assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert fetch(resumed_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)
@@ -370,6 +399,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'reviewed-originals.zip', reviewed_zip)
     atomic_write(evidence/'final-check.html',final_preview)
     atomic_write(evidence/'final-confirmed.html',final_receipt)
+    atomic_write(evidence/'confirmed-batch-preview.html',batch_preview)
+    atomic_write(evidence/'confirmed-batch.zip',batch_zip)
     atomic_write(evidence/'comparison.html',comparison_html)
     atomic_write(evidence/'restore-preview.html',restore_preview)
     atomic_write(evidence/'restored.html',restored_html)
@@ -390,6 +421,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'input_draft_logout_recovery_without_review_or_approval':True,
         'staff_review_status':reviewed['status'],'review_events':len(history['events']),
         'http_reviewed_preview':preview_status,'http_reviewed_html':reviewed_status,'http_reviewed_zip':reviewed_zip_status,
+        'http_confirmed_batch_prepare':batch_status,'http_confirmed_batch_zip':batch_zip_status,
+        'confirmed_batch_pins_originals_and_warnings_verified':True,'confirmed_batch_db_and_files_unchanged':True,
         'reviewed_edit_visible':True,'reviewed_zip_originals_sha256_verified':True,
         'http_comparison':comparison_status,'http_comparison_json':json_status,
         'comparison_changed_blocks':comparison['summary']['changed_blocks'],

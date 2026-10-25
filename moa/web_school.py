@@ -196,6 +196,9 @@ class SchoolHandler(Handler):
             if path == '/structure-confirm':
                 from . import school_review_check_web
                 return school_review_check_web.render(self,urlsplit(self.path).query)
+            if path in ('/confirmed-export','/confirmed-export/preview'):
+                from . import school_confirmed_export_web
+                return school_confirmed_export_web.dispatch(self,path,raw=urlsplit(self.path).query)
             if path == '/structure-compare':
                 return school_compare_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=10))
             if path == '/': return self._home(school_overview_web.query(urlsplit(self.path).query))
@@ -233,6 +236,7 @@ class SchoolHandler(Handler):
             maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else (300_000 if path in ('/structure-review','/structure-draft/save','/structure-draft/autosave') else 200_000)
             if path in ('/structure-draft/restore','/structure-draft/submit'): maximum = 4096
             if path == '/structure-confirm': maximum = 32768
+            if path in ('/confirmed-export/prepare','/confirmed-export/download'): maximum = 16384
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
             data = self.rfile.read(length)
@@ -240,7 +244,7 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit'), max_num_fields=80, errors='strict')
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit','/confirmed-export/prepare','/confirmed-export/download'), max_num_fields=80, errors='strict')
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
@@ -249,6 +253,9 @@ class SchoolHandler(Handler):
             if path == '/structure-confirm':
                 from . import school_review_check_web
                 return school_review_check_web.submit(self,form)
+            if path in ('/confirmed-export/prepare','/confirmed-export/download'):
+                from . import school_confirmed_export_web
+                return school_confirmed_export_web.dispatch(self,path,form=form)
             if path == '/structure-draft/save': return school_draft_web.submit(self,form)
             if path == '/structure-draft/autosave': return school_draft_web.submit(self,form,autosave=True)
             if path == '/structure-draft/restore':
