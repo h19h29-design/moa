@@ -181,6 +181,10 @@ class SchoolHandler(Handler):
             if path == '/structure-draft/compare':
                 from . import school_draft_compare_web
                 return school_draft_compare_web.render(self,urlsplit(self.path).query)
+            if path in ('/structure-draft/history', '/structure-draft/diff'):
+                from . import school_draft_history_web
+                render = school_draft_history_web.directory if path.endswith('/history') else school_draft_history_web.render_pair
+                return render(self,urlsplit(self.path).query)
             if path == '/structure-restore':
                 return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
             if path == '/structure-compare':

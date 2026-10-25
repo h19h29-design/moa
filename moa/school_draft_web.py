@@ -16,6 +16,7 @@ def link(ident, queue=None):
 
 def directory(handler, raw):
     from .school_draft_compare_web import link as compare_link
+    from .school_draft_history_web import link as history_link
     q=query(raw,{'page'})
     result=drafts.listing(handler.store,handler._principal(),page=number(q.get('page',['1'])[0],1_000_000))
     content=('<section id="input-drafts" style="overflow-wrap:anywhere"><h1>내 임시 저장 입력</h1>'
@@ -30,7 +31,8 @@ def directory(handler, raw):
         content+=('<article class="card"><h2>'+esc(row['title'])+'</h2><p>'+labels[row['action_kind']]+
             ' · 임시 #'+str(row['sequence'])+' · '+esc(row['created_at'])+'</p><a data-draft-resume href="'+
             esc(link(row['id']))+'">임시 입력 복구·확인</a> · <a data-draft-compare href="'+
-            esc(compare_link(row['id']))+'">현재 검수본과 비교</a></article>')
+            esc(compare_link(row['id']))+'">현재 검수본과 비교</a> · <a data-draft-history href="'+
+            esc(history_link(row['id']))+'">임시 입력 버전 이력</a></article>')
     content+='<nav aria-label="임시 입력 목록">'+str(result['page'])+' / '+str(result['pages'])+'페이지 '
     for page,label in ((result['page']-1,'이전'),(result['page']+1,'다음')):
         if 1<=page<=result['pages']: content+='<a href="/structure-drafts?page='+str(page)+'">'+label+'</a> '
@@ -48,10 +50,12 @@ def render(handler, raw):
 
 def read_only(handler, row):
     from .school_draft_compare_web import link as compare_link
+    from .school_draft_history_web import link as history_link
     content=('<section id="draft-readonly" style="overflow-wrap:anywhere"><h1>임시 입력 · 읽기 전용</h1>'
         '<p>기준 검수·수신본·변환·임시 입력이 변경됐거나 현재 수정 권한이 없습니다. '
         '저장했던 입력은 보존되며 최신 문서로 자동 적용·병합하지 않습니다.</p>'
         '<p><a data-draft-compare href="'+esc(compare_link(row['id']))+'">현재 검수본과 비교·변경된 기준 확인</a></p>'
+        '<p><a data-draft-history href="'+esc(history_link(row['id']))+'">임시 입력 버전 이력</a></p>'
         '<details><summary>저장한 입력 데이터</summary><pre style="white-space:pre-wrap">'+
         esc(json.dumps(row['payload'],ensure_ascii=False,indent=2))+'</pre></details>'
         '<a href="/structure-drafts">내 임시 저장 입력</a></section>')

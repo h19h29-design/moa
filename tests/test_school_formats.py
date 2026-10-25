@@ -265,6 +265,25 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert without_lists(list(store.db.iterdump()))==without_lists(before_overview)
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # Immutable private-input history remains available across formal reviews.
+    from test_school_review_drafts import draft_save
+    newer_draft = draft_save(store,svc.Principal('A','a'),ident,expected=draft_id,
+        action={'kind':'block','block_id':block['id'],'block_kind':block['kind'],'text':'다음 임시 입력'},
+        comment='형식별 이전 입력 비교')
+    before_draft_history=list(store.db.iterdump())
+    history_status,history_html,_=fetch(resumed_client,base,'/structure-draft/history?id='+newer_draft)
+    assert history_status==200 and len(BeautifulSoup(history_html,'html.parser').select('[data-draft-history-row]'))==2
+    pair_status,pair_html,_=fetch(resumed_client,base,'/structure-draft/diff?before='+draft_id+'&after='+newer_draft)
+    pair_page=BeautifulSoup(pair_html,'html.parser')
+    assert pair_status==200 and pair_page.select_one('[data-draft-base-changed]')
+    assert pair_page.select_one('[data-draft-before] [data-draft-field=text]').get_text()==fields['text']
+    assert pair_page.select_one('[data-draft-after] [data-draft-field=text]').get_text()=='다음 임시 입력'
+    assert not pair_page.select_one('[data-draft-recover]')
+    assert list(store.db.iterdump())==before_draft_history
+    assert fetch(resumed_client,base,'/html?id='+ident)[1]==rendered
+    assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)

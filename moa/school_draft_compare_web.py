@@ -25,6 +25,7 @@ def link(ident): return '/structure-draft/compare?'+urlencode({'id':ident})
 
 
 def render(handler, raw):
+    from .school_draft_history_web import link as history_link
     q=query(raw,{'id'})
     data=compare.compare(handler.store,handler._principal(),q.get('id',[''])[0])
     row=data['draft']; action=row['payload']['action']; current=data['current']
@@ -73,6 +74,7 @@ def render(handler, raw):
         if current['review_id']: route='/structure-review'; params['event']=current['review_id']
         content+='<a data-current-snapshot href="'+esc(route+'?'+urlencode(params))+'">비교한 검수 시점 보기</a> · '
     content+='<a data-latest-notice href="'+esc('/notice?'+urlencode({'id':data['latest_version']}))+'">최신 수신본 확인</a> · '
+    content+='<a data-draft-history href="'+esc(history_link(row['id']))+'">임시 입력 버전 이력</a> · '
     content+='<a href="/structure-drafts">내 임시 저장 입력</a></nav>'
     content+='<p>화면은 조회 시점 기준입니다. 복구·정식 저장 시 최신 권한과 기준을 다시 검사합니다. '
     content+='새 수신본·변환으로 텍스트를 옮기려면 최신 원본을 보고 담당자가 직접 다시 검수해야 합니다.</p></section>'
