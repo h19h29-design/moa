@@ -289,7 +289,7 @@ def _restore(store, principal, ident, current, action):
     return copy.deepcopy(overlay), changes, 'draft'
 
 
-def save(store, principal, ident, *, revision_id, base_hash, expected_review, action, comment):
+def save(store, principal, ident, *, revision_id, base_hash, expected_review, action, comment, source_draft=''):
     """One writer transaction rechecks authorization, version, digest and parent.
 
     No fields supplied by HTTP confer actor/school authority. Replaying a form
@@ -306,6 +306,10 @@ def save(store, principal, ident, *, revision_id, base_hash, expected_review, ac
         latest = v['latest']
         if v['base_hash'] != base_hash or (latest['id'] if latest else '') != expected_review:
             raise Conflict('Review was changed by another request')
+        if source_draft:
+            from . import school_draft_handoff
+            school_draft_handoff.validate_source(store,principal,source_draft,notice=ident,revision=revision_id,
+                base_hash=base_hash,expected_review=expected_review,action=action,comment=comment)
         if isinstance(action,dict) and action.get('kind')=='restore':
             overlay, changes, status = _restore(store,principal,ident,v,action)
         else:
@@ -318,6 +322,8 @@ def save(store, principal, ident, *, revision_id, base_hash, expected_review, ac
             (ident_review,principal.school,version['post_id'],ident,revision_id,
              latest['sequence']+1 if latest else 1,expected_review or None,base_hash,principal.subject,
              svc._now(),action['kind'],status,comment,int(status=='confirmed'),encode(changes),encoded))
+        if source_draft:
+            store.db.execute('INSERT INTO school_review_draft_handoffs VALUES(?,?)',(ident_review,source_draft))
         store.db.commit()
         return ident_review
     except Exception:

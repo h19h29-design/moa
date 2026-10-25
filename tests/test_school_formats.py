@@ -309,6 +309,36 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # Explicitly submit the immutable recovered input; keep every old event and
+    # original/export while appending exactly one formal event and private link.
+    handoff_status,handoff_html,_=fetch(resumed_client,base,'/structure-draft/submit?id='+latest_input['id'])
+    assert handoff_status==200
+    handoff_form=BeautifulSoup(handoff_html,'html.parser').select_one('[data-draft-submit-form]')
+    assert handoff_form is not None
+    handoff_fields={e['name']:e.get('value','') for e in handoff_form.select('input[name]')}
+    private_before=[tuple(r) for r in store.db.execute('SELECT * FROM school_review_drafts ORDER BY sequence')]
+    events_before=[tuple(r) for r in store.db.execute('SELECT * FROM school_structure_reviews ORDER BY sequence')]
+    handoff_before=list(store.db.iterdump())
+    status,handoff_receipt,_=fetch(resumed_client,base,'/structure-draft/submit',fields=handoff_fields)
+    assert status==200 and BeautifulSoup(handoff_receipt,'html.parser').select_one('[data-draft-handoff-receipt]')
+    event=store.db.execute('SELECT * FROM school_structure_reviews ORDER BY sequence DESC LIMIT 1').fetchone()
+    assert event['status']=='draft' and event['warnings_acknowledged']==0
+    assert store.db.execute('SELECT draft_id FROM school_review_draft_handoffs WHERE review_id=?',(event['id'],)).fetchone()[0]==latest_input['id']
+    assert [tuple(r) for r in store.db.execute('SELECT * FROM school_review_drafts ORDER BY sequence')]==private_before
+    assert [tuple(r) for r in store.db.execute('SELECT * FROM school_structure_reviews ORDER BY sequence')][:-1]==events_before
+    non_handoff=lambda rows:[line for line in rows if not line.startswith(
+        ('INSERT INTO "school_structure_reviews"','INSERT INTO "school_review_draft_handoffs"'))]
+    assert non_handoff(handoff_before)==non_handoff(list(store.db.iterdump()))
+    new_pin='?id='+ident+'&revision='+version['revision']+'&event='+event['id']
+    status,submitted_html,_=fetch(resumed_client,base,'/review-html'+new_pin)
+    assert status==200 and '다음 임시 입력' in submitted_html.decode()
+    assert latest_input['id'].encode() not in submitted_html
+    assert latest_input['id'].encode() not in fetch(resumed_client,base,'/structure-review'+new_pin+'&format=json')[1]
+    assert fetch(resumed_client,base,'/html?id='+ident)[1]==rendered
+    assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert fetch(resumed_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)

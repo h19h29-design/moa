@@ -184,6 +184,9 @@ class SchoolHandler(Handler):
             if path == '/structure-draft/restore':
                 from . import school_draft_restore_web
                 return school_draft_restore_web.render(self,urlsplit(self.path).query)
+            if path == '/structure-draft/submit':
+                from . import school_draft_handoff_web
+                return school_draft_handoff_web.render(self,urlsplit(self.path).query)
             if path in ('/structure-draft/history', '/structure-draft/diff'):
                 from . import school_draft_history_web
                 render = school_draft_history_web.directory if path.endswith('/history') else school_draft_history_web.render_pair
@@ -225,7 +228,7 @@ class SchoolHandler(Handler):
                 return self._send('Invalid request framing', 400)
             length = int(self.headers.get('Content-Length', '0'))
             maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else (300_000 if path in ('/structure-review','/structure-draft/save','/structure-draft/autosave') else 200_000)
-            if path == '/structure-draft/restore': maximum = 4096
+            if path in ('/structure-draft/restore','/structure-draft/submit'): maximum = 4096
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
             data = self.rfile.read(length)
@@ -233,7 +236,7 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore'), max_num_fields=80, errors='strict')
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit'), max_num_fields=80, errors='strict')
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
@@ -244,6 +247,9 @@ class SchoolHandler(Handler):
             if path == '/structure-draft/restore':
                 from . import school_draft_restore_web
                 return school_draft_restore_web.submit(self,form)
+            if path == '/structure-draft/submit':
+                from . import school_draft_handoff_web
+                return school_draft_handoff_web.submit(self,form)
             if path in ('/review-queue/save','/review-saved/move'): return school_saved_queue_web.submit(self,path,form)
             if path == '/upload':
                 incoming = svc.IncomingPost(form.get('post_key', [''])[0], form.get('title', [''])[0], form.get('body', [''])[0], tuple(

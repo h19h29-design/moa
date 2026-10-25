@@ -52,6 +52,7 @@ def read_only(handler, row):
     from .school_draft_compare_web import link as compare_link
     from .school_draft_history_web import link as history_link
     from .school_draft_restore_web import link as restore_link, origin
+    from .school_draft_handoff_web import private_status
     content=('<section id="draft-readonly" style="overflow-wrap:anywhere"><h1>임시 입력 · 읽기 전용</h1>'
         '<p>기준 검수·수신본·변환·임시 입력이 변경됐거나 현재 수정 권한이 없습니다. '
         '저장했던 입력은 보존되며 최신 문서로 자동 적용·병합하지 않습니다.</p>'
@@ -60,6 +61,7 @@ def read_only(handler, row):
         '<details><summary>저장한 입력 데이터</summary><pre style="white-space:pre-wrap">'+
         esc(json.dumps(row['payload'],ensure_ascii=False,indent=2))+'</pre></details>'
         '<p><a data-draft-restore href="'+esc(restore_link(row['id']))+'">이 입력 가져오기 전 확인</a></p>'+origin(row)+
+        private_status(handler.store,handler._principal(),row['id'])+
         '<a href="/structure-drafts">내 임시 저장 입력</a></section>')
     return handler._send(handler._shell(content))
 

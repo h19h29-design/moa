@@ -110,6 +110,8 @@ def render(handler, ident, query, *, queue=None, draft=None):
         content+='<p><a data-draft-history href="'+esc(draft_history_link(draft['id']))+'">임시 입력 버전 이력</a></p>'
         from .school_draft_restore_web import origin
         content+=origin(draft)
+        from .school_draft_handoff_web import private_status
+        content+=private_status(handler.store,handler._principal(),draft['id'])
     if v['editable']:
         content+='<p>각 구역·관계는 입력이 1.5초 멈추면 개인 초안으로 자동 임시저장합니다. 항목별 완료 표시를 확인하세요. 정식 검수 반영은 별도 저장이 필요합니다. 확인/확인 취소·과거 검수본 복원은 자동저장하지 않습니다. JavaScript가 꺼지면 수동 임시저장을 사용하세요.</p>'
         if not installed: content+='<p>입력 임시 저장의 명시적 마이그레이션이 필요합니다. 이 조회는 DB를 변경하지 않습니다.</p>'
@@ -121,6 +123,9 @@ def render(handler, ident, query, *, queue=None, draft=None):
         content += '<p>검수 #'+str(v['latest']['sequence'])+' · '+esc(v['latest']['actor'])+' · '+esc(v['latest']['created_at'])+'</p>'
         content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,v['latest']['id']))+'">이 검수 버전의 HTML 미리보기·다운로드</a></p>'
         content += _compare_links(ident,revision,v['latest'])
+        from .school_draft_handoff import for_review
+        from .school_draft_handoff_web import receipt_html
+        content += receipt_html(for_review(handler.store,handler._principal(),v['latest']['id']),formal=True)
     if not v['editable']:
         content += '<p role="status">읽기 전용: 조회 권한, 이전 수신본/변환/검수 버전, 변환 진행·실패 또는 명시적 마이그레이션 필요 상태입니다.</p>'
     content += '<h2>파일과 미확정 범위</h2><ul>'
@@ -197,6 +202,9 @@ def render_history(handler, ident, query):
         content += '<p><a href="'+_link('/structure-review',ident,revision)+'&amp;event='+quote(e['id'])+'">당시 수정본 보기</a></p>'
         content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,e['id']))+'">당시 수정본 HTML·다운로드</a></p>'
         content += _compare_links(ident,revision,e)
+        from .school_draft_handoff import for_review
+        from .school_draft_handoff_web import receipt_html
+        content += receipt_html(for_review(handler.store,handler._principal(),e['id']),formal=True)
         if v['editable'] and e['id'] != v['latest']['id']:
             content += '<p><a href="'+esc(restore_link(ident,revision,e['id']))+'">이 검수본을 새 수정본으로 복원</a></p>'
         if e['action']=='restore':

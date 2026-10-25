@@ -36,6 +36,8 @@ def render(handler, raw):
     content+='같은 수신본·변환 버전에서 조회한 검수본과만 대조합니다. 자동 병합·적용·재저장은 하지 않습니다.</p>'
     content+='<p>임시 #'+str(row['sequence'])+' · '+esc(row['created_at'])+' · 사유와 미완성 입력을 그대로 보존합니다.</p>'
     content+=origin(row)
+    from .school_draft_handoff_web import private_status
+    content+=private_status(handler.store,handler._principal(),row['id'])
     content+='<details><summary>저장 기준·비교 시점</summary><p>수신본 '+esc(row['notice_version'])+'</p>'
     content+='<p>변환 '+esc(row['conversion_revision'])+'</p><p>저장 당시 검수 '+esc(row['base_review'] or '자동 분석본')+'</p>'
     content+='<p>비교 시점 검수 '+esc((current['review_id'] or '자동 분석본') if current['available'] else '조회할 수 없음')+' · '+esc(current['created_at'])+'</p>'
