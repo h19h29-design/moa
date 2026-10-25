@@ -193,6 +193,9 @@ class SchoolHandler(Handler):
                 return render(self,urlsplit(self.path).query)
             if path == '/structure-restore':
                 return school_restore_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=3))
+            if path == '/structure-confirm':
+                from . import school_review_check_web
+                return school_review_check_web.render(self,urlsplit(self.path).query)
             if path == '/structure-compare':
                 return school_compare_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=10))
             if path == '/': return self._home(school_overview_web.query(urlsplit(self.path).query))
@@ -229,6 +232,7 @@ class SchoolHandler(Handler):
             length = int(self.headers.get('Content-Length', '0'))
             maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else (300_000 if path in ('/structure-review','/structure-draft/save','/structure-draft/autosave') else 200_000)
             if path in ('/structure-draft/restore','/structure-draft/submit'): maximum = 4096
+            if path == '/structure-confirm': maximum = 32768
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
             data = self.rfile.read(length)
@@ -242,6 +246,9 @@ class SchoolHandler(Handler):
             principal = self._principal()
             if path == '/logout': return self._logout()
             if path == '/structure-review': return school_review_web.submit(self,form)
+            if path == '/structure-confirm':
+                from . import school_review_check_web
+                return school_review_check_web.submit(self,form)
             if path == '/structure-draft/save': return school_draft_web.submit(self,form)
             if path == '/structure-draft/autosave': return school_draft_web.submit(self,form,autosave=True)
             if path == '/structure-draft/restore':

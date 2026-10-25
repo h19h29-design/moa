@@ -28,7 +28,7 @@ def receipt_html(receipt, *, formal=False):
     if formal:
         text+='<a data-handoff-source href="'+esc(link(receipt['draft_id']))+'">내가 정식 저장한 임시 입력 확인</a>'
     else:
-        for route,label in (('/structure-review','저장된 정식 수정본'),('/review-preview','이 수정본의 HTML·다운로드')):
+        for route,label in (('/structure-review','저장된 정식 수정본'),('/review-preview','이 수정본의 HTML·다운로드'),('/structure-confirm','확인 전 변경 요약·HTML 검토')):
             text+='<a data-handoff-review href="'+esc(event_link(route,receipt['notice_version'],receipt['conversion_revision'],receipt['review_id']))+'">'+label+'</a> · '
     return text+'</section>'
 

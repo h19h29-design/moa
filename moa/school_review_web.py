@@ -123,6 +123,8 @@ def render(handler, ident, query, *, queue=None, draft=None):
         content += '<p>검수 #'+str(v['latest']['sequence'])+' · '+esc(v['latest']['actor'])+' · '+esc(v['latest']['created_at'])+'</p>'
         content += '<p><a href="'+esc(export_link('/review-preview',ident,revision,v['latest']['id']))+'">이 검수 버전의 HTML 미리보기·다운로드</a></p>'
         content += _compare_links(ident,revision,v['latest'])
+        from .school_review_check_web import link as check_link
+        content += '<p><a data-final-check href="'+esc(check_link(ident,revision,v['latest']['id']))+'">확인 전 변경 요약·HTML 검토</a></p>'
         from .school_draft_handoff import for_review
         from .school_draft_handoff_web import receipt_html
         content += receipt_html(for_review(handler.store,handler._principal(),v['latest']['id']),formal=True)

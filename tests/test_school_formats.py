@@ -12,7 +12,7 @@ import zipfile
 
 import pytest
 
-from moa import mobile, school_service as svc
+from moa import mobile, school_service as svc, school_review as structure_review
 from moa.core import atomic_write, digest, write_json
 from test_mobile import multipart
 from test_web_school import school_web, client, fetch, login
@@ -337,6 +337,27 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert fetch(resumed_client,base,'/html?id='+ident)[1]==rendered
     assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
     assert fetch(resumed_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
+    # Final review uses the same saved HTML and appends only confirmation.
+    final_url='/structure-confirm'+new_pin
+    final_status,final_preview,_=fetch(resumed_client,base,final_url)
+    final_form=BeautifulSoup(final_preview,'html.parser').select_one('[data-final-confirm]')
+    assert final_status==200 and final_form is not None
+    final_fields={e['name']:e.get('value','') for e in final_form.select('input[name]')}
+    final_fields.update(acknowledge='yes',comment='형식별 HTML·구역·경고 대조 완료')
+    final_before=list(store.db.iterdump());final_events=[tuple(r) for r in store.db.execute('SELECT * FROM school_structure_reviews ORDER BY sequence')]
+    assert fetch(resumed_client,base,'/review-html'+new_pin)[1]==submitted_html
+    final_status,final_receipt,_=fetch(resumed_client,base,'/structure-confirm',fields=final_fields)
+    assert final_status==200 and BeautifulSoup(final_receipt,'html.parser').select_one('[data-final-reason=already_confirmed]')
+    current=structure_review.view(store,svc.Principal('A','a'),ident)
+    assert current['status']=='confirmed' and current['latest']['previous_id']==event['id']
+    assert current['analysis']['warnings']==analysis['warnings'] and current['analysis']['complete'] is False
+    assert current['latest']['changes']==[{'target':'status','before':'draft','after':'confirmed'}]
+    assert [tuple(r) for r in store.db.execute('SELECT * FROM school_structure_reviews ORDER BY sequence')][:-1]==final_events
+    stable_final=lambda rows:[r for r in rows if not r.startswith('INSERT INTO "school_structure_reviews"')]
+    assert stable_final(final_before)==stable_final(list(store.db.iterdump()))
+    assert fetch(resumed_client,base,'/review-html'+new_pin)[1]==submitted_html
+    assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert fetch(resumed_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
@@ -347,6 +368,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'reviewed.html', reviewed_html)
     atomic_write(evidence/'input-recovery.html', recovery_html)
     atomic_write(evidence/'reviewed-originals.zip', reviewed_zip)
+    atomic_write(evidence/'final-check.html',final_preview)
+    atomic_write(evidence/'final-confirmed.html',final_receipt)
     atomic_write(evidence/'comparison.html',comparison_html)
     atomic_write(evidence/'restore-preview.html',restore_preview)
     atomic_write(evidence/'restored.html',restored_html)

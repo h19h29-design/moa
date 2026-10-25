@@ -35,4 +35,6 @@ def serve(handler, route, query):
         '<a href="'+zip_url+'">수정본 HTML·원본 ZIP 다운로드</a></p>'
         '<iframe title="검수 수정본 HTML" sandbox style="width:100%;height:75vh;border:1px solid #ccd" src="'+html_url+'"></iframe>')
     content += '<p><a href="'+esc(compare_link(field('id'),field('revision'),'original',field('event')))+'">자동 분석본과 변경점 비교</a></p>'
+    from .school_review_check_web import link as check_link
+    content += '<p><a data-final-check href="'+esc(check_link(field('id'),field('revision'),field('event')))+'">확인 전 변경 요약·HTML 검토</a></p>'
     return handler._send(handler._shell(content))
