@@ -136,6 +136,10 @@ def get(store, principal, ident):
     if not row: raise LookupError('Input draft not found')
     result=dict(row); svc.get_version(store,principal,result['notice_version'])
     result['payload']=json.loads(result['payload'])
+    from .school_draft_restore import available as restore_available
+    origin = store.db.execute('SELECT source_id FROM school_review_draft_restores WHERE draft_id=?',
+                              (ident,)).fetchone() if restore_available(store) else None
+    result['restored_from'] = origin['source_id'] if origin else None
     return result
 
 

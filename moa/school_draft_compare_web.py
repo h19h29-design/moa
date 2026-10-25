@@ -26,6 +26,7 @@ def link(ident): return '/structure-draft/compare?'+urlencode({'id':ident})
 
 def render(handler, raw):
     from .school_draft_history_web import link as history_link
+    from .school_draft_restore_web import link as restore_link, origin
     q=query(raw,{'id'})
     data=compare.compare(handler.store,handler._principal(),q.get('id',[''])[0])
     row=data['draft']; action=row['payload']['action']; current=data['current']
@@ -34,6 +35,7 @@ def render(handler, raw):
     content+='<p class="compare-note">저장된 개인 입력은 정식 검수·확인·HTML 반영이 아닙니다. '
     content+='같은 수신본·변환 버전에서 조회한 검수본과만 대조합니다. 자동 병합·적용·재저장은 하지 않습니다.</p>'
     content+='<p>임시 #'+str(row['sequence'])+' · '+esc(row['created_at'])+' · 사유와 미완성 입력을 그대로 보존합니다.</p>'
+    content+=origin(row)
     content+='<details><summary>저장 기준·비교 시점</summary><p>수신본 '+esc(row['notice_version'])+'</p>'
     content+='<p>변환 '+esc(row['conversion_revision'])+'</p><p>저장 당시 검수 '+esc(row['base_review'] or '자동 분석본')+'</p>'
     content+='<p>비교 시점 검수 '+esc((current['review_id'] or '자동 분석본') if current['available'] else '조회할 수 없음')+' · '+esc(current['created_at'])+'</p>'
@@ -67,7 +69,9 @@ def render(handler, raw):
     saved+='<h3>임시 저장 사유 · 정식 검수 사유 아님</h3><pre>'+esc(row['payload']['comment'])+'</pre></section>'
     content+='</section>'+saved+'</div><p>강조는 다른 가운데 범위를 표시하며 최소 단어 단위 차이나 적용 결과가 아닙니다.</p><nav aria-label="임시 입력 비교 이동">'
     if data['recoverable']: content+='<a data-draft-recover href="'+esc(school_draft_web.link(row['id']))+'">이 입력 복구·검수 계속하기</a> · '
-    if data['head']['id']!=row['id']: content+='<a href="'+esc(link(data['head']['id']))+'">더 최신 임시 입력 비교</a> · '
+    if data['head']['id']!=row['id']:
+        content+='<a href="'+esc(link(data['head']['id']))+'">더 최신 임시 입력 비교</a> · '
+        content+='<a data-draft-restore href="'+esc(restore_link(row['id']))+'">이전 입력 가져오기 전 확인</a> · '
     if data['comparable']:
         params={'id':row['notice_version'],'revision':row['conversion_revision']}
         route='/structure'

@@ -284,6 +284,31 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # Reuse only an older private input on the unchanged current formal base.
+    blocked=BeautifulSoup(fetch(resumed_client,base,'/structure-draft/restore?id='+draft_id)[1],'html.parser')
+    assert blocked.select_one('[data-restore-reason="review_changed"]')
+    assert not blocked.select_one('[data-draft-restore-form]')
+    head=draft_save(store,svc.Principal('A','a'),ident,expected=newer_draft,
+        action={'kind':'block','block_id':block['id'],'block_kind':block['kind'],'text':'비교할 최신 임시 입력'})
+    restore_status,restore_preview,_=fetch(resumed_client,base,'/structure-draft/restore?id='+newer_draft)
+    assert restore_status==200
+    restore_form=BeautifulSoup(restore_preview,'html.parser').select_one('[data-draft-restore-form]')
+    restore_fields={e['name']:e.get('value','') for e in restore_form.select('input[name]')}
+    old_inputs=[tuple(r) for r in store.db.execute('SELECT * FROM school_review_drafts ORDER BY sequence')]
+    before_reuse=list(store.db.iterdump())
+    assert fetch(resumed_client,base,'/structure-draft/restore',fields=restore_fields)[0]==200
+    latest_input=store.db.execute('SELECT * FROM school_review_drafts ORDER BY sequence DESC LIMIT 1').fetchone()
+    assert latest_input['previous_id']==head and latest_input['sequence']==4
+    assert store.db.execute('SELECT source_id FROM school_review_draft_restores WHERE draft_id=?',
+        (latest_input['id'],)).fetchone()[0]==newer_draft
+    assert [tuple(r) for r in store.db.execute('SELECT * FROM school_review_drafts ORDER BY sequence')][:3]==old_inputs
+    non_inputs=lambda rows:[line for line in rows if not line.startswith(
+        ('INSERT INTO "school_review_drafts"','INSERT INTO "school_review_draft_restores"'))]
+    assert non_inputs(before_reuse)==non_inputs(list(store.db.iterdump()))
+    assert fetch(resumed_client,base,'/html?id='+ident)[1]==rendered
+    assert fetch(resumed_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)

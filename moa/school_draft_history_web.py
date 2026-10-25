@@ -23,6 +23,7 @@ def _stamp(row):
 
 
 def directory(handler, raw):
+    from .school_draft_restore_web import link as restore_link
     q = query(raw, {'id', 'page'})
     data = history.history(handler.store, handler._principal(), q.get('id', [''])[0],
         page=number(q.get('page', ['1'])[0], 1_000_000))
@@ -46,6 +47,8 @@ def directory(handler, raw):
         content += '<article class="card" data-draft-history-row><h2>'+_stamp(row)+'</h2>'
         content += '<p>'+('현재 최신 개인 입력' if row['id']==data['head']['id'] else '이전 개인 입력 · 읽기 전용')+'</p>'
         content += '<a data-draft-current href="'+esc(current_link(row['id']))+'">이 입력과 현재 검수본 비교</a>'
+        if row['id'] != data['head']['id']:
+            content += ' · <a data-draft-restore href="'+esc(restore_link(row['id']))+'">이전 입력 가져오기 전 확인</a>'
         if row['previous_id']:
             content += ' · <a data-draft-previous href="'+esc(diff_link(row['previous_id'],row['id']))+'">직전 임시 버전과 비교</a>'
         content += '</article>'
@@ -58,6 +61,7 @@ def directory(handler, raw):
 
 
 def render_pair(handler, raw):
+    from .school_draft_restore_web import link as restore_link, origin
     q = query(raw, {'before','after'})
     data = history.pair(handler.store, handler._principal(), q.get('before',[''])[0], q.get('after',[''])[0])
     before, after = data['before'], data['after']
@@ -91,7 +95,9 @@ def render_pair(handler, raw):
         for name, title, values in rendered:
             content += '<h3>'+title+'</h3><pre data-draft-field="'+name+'">'+values[index]+'</pre>'
         content += '<details><summary>작성 기준</summary><p>정식 검수 '+esc(row['base_review'] or '자동 분석본')+'</p><p>구조 SHA-256 '+esc(row['base_hash'])+'</p></details>'
-        content += '<p><a data-draft-current href="'+esc(current_link(row['id']))+'">이 입력과 현재 검수본 비교</a></p></section>'
+        content += origin(row)
+        content += '<p><a data-draft-current href="'+esc(current_link(row['id']))+'">이 입력과 현재 검수본 비교</a> · '
+        content += '<a data-draft-restore href="'+esc(restore_link(row['id']))+'">이 입력 가져오기 전 확인</a></p></section>'
     content += '</div><p>강조는 다른 가운데 범위이며 최소 단어 단위 차이 또는 적용 결과가 아닙니다. 공백·개행을 보존합니다.</p>'
     content += '<nav><a data-draft-history href="'+esc(link(after['id']))+'">대상 시점까지 임시 입력 이력</a> · '
     content += '<a href="/structure-drafts">내 임시 저장 입력</a></nav></section>'
