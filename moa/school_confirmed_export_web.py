@@ -17,6 +17,15 @@ from .web import esc
 MAX_PREPARED = 4
 
 
+def remember(handler, data, *, source=None):
+    """Session-only preparation; durable saving and download remain explicit."""
+    p=handler._principal();entries=handler._session().setdefault('school_confirmed_exports',{})
+    while len(entries)>=MAX_PREPARED: entries.pop(next(iter(entries)))
+    key=secrets.token_urlsafe(18)
+    entries[key]={'school':p.school,'subject':p.subject,'pins':data['pins'],'source':source}
+    return key
+
+
 def _load(handler, key):
     if not re.fullmatch(r'[A-Za-z0-9_-]{24}',key): raise ValueError('Invalid prepared bundle')
     p=handler._principal()
@@ -54,13 +63,19 @@ def render(handler, raw):
     q=query(raw,{'bundle'})
     if set(q)!={'bundle'}: raise ValueError('Prepared bundle required')
     key=q['bundle'][0];data=_load(handler,key)
-    return preview(handler,data,key)
+    source=handler._session()['school_confirmed_exports'][key].get('source')
+    return preview(handler,data,key,source=source)
 
 
-def preview(handler, data, key, *, saved_row=None):
+def preview(handler, data, key, *, saved_row=None, source=None):
     content=STYLE+'<section class="comparison" id="confirmed-export-preview"><h1>'+('저장한 확인 완료본 묶음' if saved_row else '확인 완료본 묶음 준비 결과')+'</h1>'
     if saved_row:
         content+='<h2 data-export-saved-name>'+esc(saved_row['name'])+'</h2><p>목록 저장 '+esc(saved_row['created_at'])+' · 내 계정 전용</p>'
+        from .school_confirmed_export_refresh_web import link as status_link
+        content+='<p><a data-export-status-link href="'+esc(status_link(key))+'">문서별 상태·변경 확인</a></p>'
+    elif source:
+        from .school_confirmed_export_refresh_web import link as status_link
+        content+='<p class="compare-note" data-export-refresh-source>저장 목록 <a href="'+esc(status_link(source['id']))+'">'+esc(source['name'])+'</a>의 최신 확인본으로 준비했습니다. 원래 저장 목록은 보존됩니다. 아래 포함 문서·확인 시점·남은 경고를 다시 대조하세요.</p>'
     content+='<p data-export-summary>'+str(len(data['documents']))+'건 · 원본 합계 '+str(data['original_bytes'])+'바이트 · 비공개</p>'
     content+='<p class="compare-note">표시한 수신·변환·검수 버전만 내려받습니다. 준비 뒤 정정·재변환·검수 수정·확인 해제가 있으면 전체 다운로드를 중단합니다. 공개 승인은 포함하지 않습니다.</p>'
     for d in data['documents']:
@@ -87,9 +102,7 @@ def submit(handler, path, form):
             raise ValueError('Invalid selection fields')
         items=[json.loads(value) for value in form['item']]
         data=batch.prepare(handler.store,handler._principal(),items)
-        p=handler._principal();entries=handler._session().setdefault('school_confirmed_exports',{})
-        while len(entries)>=MAX_PREPARED: entries.pop(next(iter(entries)))
-        key=secrets.token_urlsafe(18);entries[key]={'school':p.school,'subject':p.subject,'pins':data['pins']}
+        key=remember(handler,data)
         return handler._redirect('/confirmed-export/preview?'+urlencode({'bundle':key}))
     if set(form)!={'csrf','bundle','acknowledge'} or any(len(v)!=1 for v in form.values()) or form['acknowledge'][0]!='yes':
         raise ValueError('Explicit batch download acknowledgement required')
@@ -99,6 +112,9 @@ def submit(handler, path, form):
 
 def dispatch(handler, path, *, raw=None, form=None):
     try:
+        if path in ('/confirmed-export/saved/status','/confirmed-export/saved/prepare-current'):
+            from . import school_confirmed_export_refresh_web
+            return school_confirmed_export_refresh_web.dispatch(handler,raw=raw,form=form)
         if path in ('/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/save','/confirmed-export/saved/download'):
             from . import school_confirmed_export_saved_web
             return school_confirmed_export_saved_web.dispatch(handler,path,raw=raw,form=form)

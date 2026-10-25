@@ -27,6 +27,7 @@ def save_form(handler, key):
 
 
 def directory(handler, raw):
+    from .school_confirmed_export_refresh_web import link as status_link
     q=query(raw,{'page'})
     data=saved.listing(handler.store,handler._principal(),page=number(q.get('page',['1'])[0],1_000_000))
     content=web.STYLE+'<section class="comparison" id="saved-confirmed-exports"><h1>저장한 확인 완료본 묶음</h1>'
@@ -36,7 +37,7 @@ def directory(handler, raw):
     elif not data['rows']: content+='<p>저장한 묶음이 없습니다. 확인 완료본을 선택·준비한 뒤 목록을 저장하세요.</p>'
     for row in data['rows']:
         content+='<article class="card"><h2>'+esc(row['name'])+'</h2><p>'+str(row['item_count'])+'건 · 목록 저장 '+esc(row['created_at'])+'</p>'
-        content+='<a data-export-saved-resume href="'+esc(link(row['id']))+'">묶음 확인·이어서 다운로드</a></article>'
+        content+='<a data-export-saved-resume href="'+esc(link(row['id']))+'">묶음 확인·이어서 다운로드</a> · <a data-export-status-link href="'+esc(status_link(row['id']))+'">문서별 상태·변경 확인</a></article>'
     content+='<nav aria-label="저장한 묶음 페이지">'+str(data['page'])+' / '+str(data['pages'])+'페이지 · 총 '+str(data['total'])+'개'
     for page,label in ((data['page']-1,'이전 목록'),(data['page']+1,'다음 목록')):
         if 1<=page<=data['pages']: content+=' · <a href="/confirmed-export/saved?page='+str(page)+'">'+label+'</a>'
@@ -44,11 +45,13 @@ def directory(handler, raw):
 
 
 def _blocked(handler, row):
+    from .school_confirmed_export_refresh_web import link as status_link
     content=web.STYLE+'<section class="comparison" id="saved-export-blocked"><h1>저장한 묶음 다운로드가 차단됐습니다</h1>'
     content+='<h2>'+esc(row['name'])+'</h2><p>저장 뒤 수신·변환·검수 버전 또는 원본 무결성이 달라졌습니다. '
     content+='일부 문서만 내려받거나 최신본으로 바꾸지 않습니다. 저장 목록·원본·이전 검수 이력은 보존됩니다.</p><ul>'
     content+=''.join('<li>'+esc(item['title'])+'</li>' for item in row['items'])
-    content+='</ul><p>최신 확인 상태와 원본을 대조한 뒤 새 목록으로 저장하세요.</p>'
+    content+='</ul><p><a data-export-status-link href="'+esc(status_link(row['id']))+'">문서별 변경 사유·최신 확인 상태 대조</a></p>'
+    content+='<p>최신 확인 상태와 원본을 대조한 뒤 새 목록으로 저장하세요.</p>'
     return handler._send(handler._shell(content+'<p><a href="/confirmed-export">최신 확인 완료본 선택</a> · <a href="/confirmed-export/saved">저장한 묶음 목록</a></p></section>'),409)
 
 
