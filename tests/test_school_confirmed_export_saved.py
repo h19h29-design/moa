@@ -45,8 +45,8 @@ def other_rows(s):
 
 
 def drop_v7(s):
-    s.db.executescript('DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists;'
-        ' DELETE FROM school_service_migrations WHERE version=7;')
+    s.db.executescript('DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists;'
+        ' DELETE FROM school_service_migrations WHERE version>=7;')
 
 
 def test_frozen_order_titles_hashes_survive_a_new_connection_without_changing_existing_evidence(schools):

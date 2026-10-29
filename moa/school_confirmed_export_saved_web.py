@@ -28,19 +28,33 @@ def save_form(handler, key):
 
 def directory(handler, raw):
     from .school_confirmed_export_refresh_web import link as status_link
-    q=query(raw,{'page'})
-    data=saved.listing(handler.store,handler._principal(),page=number(q.get('page',['1'])[0],1_000_000))
+    from . import school_confirmed_export_management as management
+    from .school_confirmed_export_management_web import link as management_link
+    q=query(raw,{'page','q','from','to','state'})
+    data=management.listing(handler.store,handler._principal(),page=number(q.get('page',['1'])[0],1_000_000),
+        q=q.get('q',[''])[0],after=q.get('from',[''])[0],before=q.get('to',[''])[0],state=q.get('state',['active'])[0])
+    f=data['filters']
     content=web.STYLE+'<section class="comparison" id="saved-confirmed-exports"><h1>저장한 확인 완료본 묶음</h1>'
     content+='<p>내 학교·내 담당자 계정에만 보이는 비공개 목록입니다. 재로그인·서버 재시작 후에도 이어서 다운로드할 수 있습니다.</p>'
     content+='<p>저장 시점의 문서 순서와 확인 버전을 유지합니다. 열기·다운로드 때 다시 검사하며, 달라진 버전으로 자동 대체하지 않습니다.</p>'
+    content+='<p>보관함으로 옮긴 목록은 기본 목록에서 숨기며 삭제하지 않습니다. 기간은 한국 시간의 목록 저장일 기준이며 양 끝 날짜를 포함합니다.</p>'
+    content+='<form method="get" action="/confirmed-export/saved" data-export-saved-filters><label>목록 이름 검색<input type="search" name="q" maxlength="120" value="'+esc(f['q'])+'"></label>'
+    content+='<label>저장일 시작<input type="date" name="from" value="'+esc(f['after'])+'"></label><label>저장일 끝<input type="date" name="to" value="'+esc(f['before'])+'"></label>'
+    content+='<label>표시 범위<select name="state">'
+    for value,label in (('active','사용 중'),('archived','보관함'),('all','전체')):
+        content+='<option value="'+value+'"'+(' selected' if f['state']==value else '')+'>'+label+'</option>'
+    content+='</select></label><button>목록 검색</button> <a href="/confirmed-export/saved">검색 초기화</a></form>'
     if data['migration_required']: content+='<p>목록 저장 기능의 명시적 마이그레이션이 필요합니다. 이 화면은 DB를 변경하지 않습니다.</p>'
-    elif not data['rows']: content+='<p>저장한 묶음이 없습니다. 확인 완료본을 선택·준비한 뒤 목록을 저장하세요.</p>'
+    elif data['management_required']: content+='<p>보관·복원 기능의 명시적 마이그레이션이 필요합니다. 기존 저장 목록은 계속 확인할 수 있습니다.</p>'
+    if not data['migration_required'] and not data['rows']: content+='<p>조건에 맞는 저장 묶음이 없습니다. 검색 범위·보관함을 확인하거나 새 목록을 저장하세요.</p>'
     for row in data['rows']:
-        content+='<article class="card"><h2>'+esc(row['name'])+'</h2><p>'+str(row['item_count'])+'건 · 목록 저장 '+esc(row['created_at'])+'</p>'
-        content+='<a data-export-saved-resume href="'+esc(link(row['id']))+'">묶음 확인·이어서 다운로드</a> · <a data-export-status-link href="'+esc(status_link(row['id']))+'">문서별 상태·변경 확인</a></article>'
+        content+='<article class="card" data-export-saved-card><h2>'+esc(row['name'])+'</h2><p>'+('보관함' if row['state']=='archived' else '사용 중')+' · '+str(row['item_count'])+'건 · 목록 저장 '+esc(row['created_at'])+'</p>'
+        content+='<a data-export-saved-resume href="'+esc(link(row['id']))+'">묶음 확인·이어서 다운로드</a> · <a data-export-status-link href="'+esc(status_link(row['id']))+'">문서별 상태·변경 확인</a>'
+        content+=' · <a data-export-manage href="'+esc(management_link(row['id']))+'">보관·복원 이력</a></article>'
     content+='<nav aria-label="저장한 묶음 페이지">'+str(data['page'])+' / '+str(data['pages'])+'페이지 · 총 '+str(data['total'])+'개'
     for page,label in ((data['page']-1,'이전 목록'),(data['page']+1,'다음 목록')):
-        if 1<=page<=data['pages']: content+=' · <a href="/confirmed-export/saved?page='+str(page)+'">'+label+'</a>'
+        filters={k:v for k,v in (('q',f['q']),('from',f['after']),('to',f['before']),('state',f['state'] if f['state']!='active' else '')) if v}
+        if 1<=page<=data['pages']: content+=' · <a href="/confirmed-export/saved?'+esc(urlencode({**filters,'page':page}))+'">'+label+'</a>'
     return handler._send(handler._shell(content+'</nav><p><a href="/confirmed-export">새 확인 완료본 선택</a> · <a href="/#review-overview">학교 현황으로</a></p></section>'))
 
 

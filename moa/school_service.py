@@ -117,28 +117,30 @@ def migrate(store: Store):
     """
     exists = store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_migrations'").fetchone()
     versions = [r[0] for r in store.db.execute('SELECT version FROM school_service_migrations ORDER BY version')] if exists else []
-    if versions not in [list(range(1,n)) for n in range(1,9)] or (exists and not versions):
+    if versions not in [list(range(1,n)) for n in range(1,10)] or (exists and not versions):
         raise RuntimeError('Unknown school schema; reconcile before migration')
-    if versions == list(range(1,8)): return None
+    if versions == list(range(1,9)): return None
     from .school_review import SCHEMA_V2
     from .school_saved_queue import SCHEMA_V3
     from .school_review_drafts import SCHEMA_V4
     from .school_draft_restore import SCHEMA_V5
     from .school_draft_handoff import SCHEMA_V6
     from .school_confirmed_export_saved import SCHEMA_V7
-    backup = store.backup('school-service-v7-' + uuid.uuid4().hex[:12])
+    from .school_confirmed_export_management import SCHEMA_V8
+    backup = store.backup('school-service-v8-' + uuid.uuid4().hex[:12])
     try:
         store.db.executescript('BEGIN IMMEDIATE;\n' + (SCHEMA if not exists else '') +
             (SCHEMA_V2 if 2 not in versions else '') + (SCHEMA_V3 if 3 not in versions else '') +
             (SCHEMA_V4 if 4 not in versions else '') + (SCHEMA_V5 if 5 not in versions else '') +
-            (SCHEMA_V6 if 6 not in versions else '') + SCHEMA_V7)
+            (SCHEMA_V6 if 6 not in versions else '') + (SCHEMA_V7 if 7 not in versions else '') + SCHEMA_V8)
         if not exists: store.db.execute('INSERT INTO school_service_migrations VALUES(1,?)', (_now(),))
         if 2 not in versions: store.db.execute('INSERT INTO school_service_migrations VALUES(2,?)', (_now(),))
         if 3 not in versions: store.db.execute('INSERT INTO school_service_migrations VALUES(3,?)', (_now(),))
         if 4 not in versions: store.db.execute('INSERT INTO school_service_migrations VALUES(4,?)', (_now(),))
         if 5 not in versions: store.db.execute('INSERT INTO school_service_migrations VALUES(5,?)', (_now(),))
         if 6 not in versions: store.db.execute('INSERT INTO school_service_migrations VALUES(6,?)', (_now(),))
-        store.db.execute('INSERT INTO school_service_migrations VALUES(7,?)', (_now(),))
+        if 7 not in versions: store.db.execute('INSERT INTO school_service_migrations VALUES(7,?)', (_now(),))
+        store.db.execute('INSERT INTO school_service_migrations VALUES(8,?)', (_now(),))
         store.db.commit()
     except Exception:
         store.db.rollback()
