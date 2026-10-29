@@ -122,7 +122,7 @@ def dispatch(handler, path, *, raw=None, form=None):
         if path in ('/confirmed-export/saved/status','/confirmed-export/saved/prepare-current'):
             from . import school_confirmed_export_refresh_web
             return school_confirmed_export_refresh_web.dispatch(handler,raw=raw,form=form)
-        if path in ('/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/receipts'):
+        if path in ('/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/receipts','/confirmed-export/saved/receipts.csv'):
             from . import school_confirmed_export_saved_web
             return school_confirmed_export_saved_web.dispatch(handler,path,raw=raw,form=form)
         if form is not None: return submit(handler,path,form)

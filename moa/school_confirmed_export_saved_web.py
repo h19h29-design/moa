@@ -77,9 +77,9 @@ def _blocked(handler, row):
 
 def dispatch(handler, path, *, raw=None, form=None):
     if form is None and path=='/confirmed-export/saved': return directory(handler,raw)
-    if form is None and path=='/confirmed-export/saved/receipts':
-        from .school_confirmed_export_downloads_web import render
-        return render(handler,raw)
+    if form is None and path in ('/confirmed-export/saved/receipts','/confirmed-export/saved/receipts.csv'):
+        from .school_confirmed_export_downloads_web import render, export
+        return export(handler,raw) if path.endswith('.csv') else render(handler,raw)
     if form is not None and path=='/confirmed-export/save':
         if set(form)!={'csrf','bundle','name'} or any(len(v)!=1 for v in form.values()):
             raise ValueError('Invalid saved export fields')
