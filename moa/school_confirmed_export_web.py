@@ -116,8 +116,9 @@ def submit(handler, path, form):
 
 def dispatch(handler, path, *, raw=None, form=None):
     try:
-        if form is None and path=='/confirmed-export/receipts':
+        if form is None and path in ('/confirmed-export/receipts','/confirmed-export/receipts.csv'):
             from . import school_receipt_overview_web
+            if path.endswith('.csv'): return school_receipt_overview_web.export(handler,raw)
             return school_receipt_overview_web.render(handler,raw)
         if path in ('/confirmed-export/saved/manage','/confirmed-export/saved/archive','/confirmed-export/saved/restore'):
             from . import school_confirmed_export_management_web
