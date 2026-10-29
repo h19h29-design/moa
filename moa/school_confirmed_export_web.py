@@ -75,6 +75,8 @@ def preview(handler, data, key, *, saved_row=None, source=None):
         content+='<p><a data-export-status-link href="'+esc(status_link(key))+'">문서별 상태·변경 확인</a></p>'
         from .school_confirmed_export_management_web import link as management_link
         content+='<p><a data-export-manage href="'+esc(management_link(key))+'">목록 보관·복원 이력</a></p>'
+        from .school_confirmed_export_downloads_web import link as receipt_link
+        content+='<p><a data-export-receipts href="'+esc(receipt_link(key))+'">다운로드 영수증</a></p>'
     elif source:
         from .school_confirmed_export_refresh_web import link as status_link
         content+='<p class="compare-note" data-export-refresh-source>저장 목록 <a href="'+esc(status_link(source['id']))+'">'+esc(source['name'])+'</a>의 최신 확인본으로 준비했습니다. 원래 저장 목록은 보존됩니다. 아래 포함 문서·확인 시점·남은 경고를 다시 대조하세요.</p>'
@@ -120,7 +122,7 @@ def dispatch(handler, path, *, raw=None, form=None):
         if path in ('/confirmed-export/saved/status','/confirmed-export/saved/prepare-current'):
             from . import school_confirmed_export_refresh_web
             return school_confirmed_export_refresh_web.dispatch(handler,raw=raw,form=form)
-        if path in ('/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/save','/confirmed-export/saved/download'):
+        if path in ('/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/receipts'):
             from . import school_confirmed_export_saved_web
             return school_confirmed_export_saved_web.dispatch(handler,path,raw=raw,form=form)
         if form is not None: return submit(handler,path,form)

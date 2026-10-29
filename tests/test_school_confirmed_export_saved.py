@@ -41,12 +41,19 @@ def http_saved(a,base,csrf,items,name='합성 확인 완료본 묶음'):
 
 def other_rows(s):
     return [r for r in s.db.iterdump() if not r.startswith(('INSERT INTO "school_confirmed_export_lists"',
-        'INSERT INTO "school_confirmed_export_items"'))]
+        'INSERT INTO "school_confirmed_export_items"',
+        'INSERT INTO "school_confirmed_export_downloads"'))]
 
 
 def drop_v7(s):
-    s.db.executescript('DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists;'
+    s.db.executescript('DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists;'
         ' DELETE FROM school_service_migrations WHERE version>=7;')
+
+
+def without_receipts(s):
+    """Every row except the append-only download receipts a download adds."""
+    return [line for line in s.db.iterdump()
+        if not line.startswith('INSERT INTO "school_confirmed_export_downloads"')]
 
 
 def test_frozen_order_titles_hashes_survive_a_new_connection_without_changing_existing_evidence(schools):
@@ -181,8 +188,8 @@ def test_http_saved_bundle_survives_logout_and_expiring_preparations_with_fresh_
     ack=doc.select_one('[name=acknowledge]');assert ack.has_attr('required') and not ack.has_attr('checked')
     status,raw,_=fetch(a,base,'/confirmed-export/saved/download',fields=fields);assert status==200
     verify_zip(raw,s,p,items);assert fetch(a,base,'/confirmed-export/download',fields=temporary)[1]==raw
-    after=list(s.db.iterdump());assert fetch(a,base,'/confirmed-export/save',fields=save_fields)[0]==200
-    assert list(s.db.iterdump())==after
+    after=without_receipts(s);assert fetch(a,base,'/confirmed-export/save',fields=save_fields)[0]==200
+    assert without_receipts(s)==after
     for _ in range(4):assert http_prepare(a,base,csrf,items)[0]==200
     assert fetch(a,base,get_url(temporary))[0]==404
     assert fetch(a,base,'/confirmed-export/saved/download',fields=fields)[1]==raw
@@ -199,14 +206,14 @@ def test_http_saved_bundle_survives_logout_and_expiring_preparations_with_fresh_
     assert fetch(fresh,base,'/confirmed-export/saved/download',fields=fields)[0]==403
     assert fetch(fresh,base,'/confirmed-export/saved/download',fields={**current,'acknowledge':'yes'})[1]==raw
     assert 'no-store' in headers['Cache-Control'] and "script-src 'self'" in headers['Content-Security-Policy']
-    assert list(s.db.iterdump())==after and other_rows(s)==before and originals(s)==files
+    assert without_receipts(s)==after and other_rows(s)==before and originals(s)==files
     assert export.render_html(old)==old_html and export.bundle(s,old)==old_zip
 
 
 def test_restart_without_any_sessions_can_resume_and_download_from_a_separate_store(school_web):
     web,s,base=school_web;p=svc.Principal('A','a');items=[confirmed(s,p)]
     a=client();csrf=login(a,base);_,fields,_,_=http_saved(a,base,csrf,items)
-    expected=fetch(a,base,'/confirmed-export/saved/download',fields=fields)[1];before=list(s.db.iterdump())
+    expected=fetch(a,base,'/confirmed-export/saved/download',fields=fields)[1];before=without_receipts(s)
     with Store(s.root,thread_safe=True) as reopened:
         users={'a':dict(school='A',subject='a',**web.password_record('synthetic-a-only'))}
         handler=web.make_handler(reopened,users);assert not handler.sessions
@@ -219,7 +226,7 @@ def test_restart_without_any_sessions_can_resume_and_download_from_a_separate_st
             download=inputs(doc.select_one('[data-export-download]'));download['acknowledge']='yes'
             assert fetch(fresh,address,'/confirmed-export/saved/download',fields=download)[1]==expected
         finally:server.shutdown();thread.join();server.server_close()
-    assert list(s.db.iterdump())==before
+    assert without_receipts(s)==before
 
 
 def test_lists_are_owner_private_and_readers_cannot_save_but_demoted_owners_can_still_download(school_web):

@@ -12,7 +12,7 @@ from test_school_structure import converted
 from test_school_structure_review import save
 from test_school_review_check import originals
 from test_school_confirmed_export import confirmed, verify_zip
-from test_school_confirmed_export_saved import IDENT, page, inputs, http_saved, drop_v7
+from test_school_confirmed_export_saved import IDENT, page, inputs, http_saved, drop_v7, without_receipts
 from test_web_school import school_web, client, fetch, login
 
 
@@ -203,7 +203,7 @@ def test_http_rebuild_is_explicit_separate_and_survives_relogin_with_old_history
     assert download['id']!=old['id'] and s.db.execute('SELECT count(*) FROM school_confirmed_export_lists').fetchone()[0]==2
     expected=batch.prepare(s,p,items)['pins'];assert saved.get(s,p,download['id'])['pins']==expected
     assert saved.get(s,p,old['id'])==frozen
-    after=list(s.db.iterdump());raw_zip=fetch(a,base,'/confirmed-export/saved/download',fields=download)[1]
+    after=without_receipts(s);raw_zip=fetch(a,base,'/confirmed-export/saved/download',fields=download)[1]
     verify_zip(raw_zip,s,p,items)
     assert fetch(a,base,'/logout',fields={'csrf':csrf})[0]==200
     fresh=client();login(fresh,base)
@@ -213,7 +213,7 @@ def test_http_rebuild_is_explicit_separate_and_survives_relogin_with_old_history
     values=inputs(new_page.select_one('[data-export-download]'));values['acknowledge']='yes'
     assert fetch(fresh,base,'/confirmed-export/saved/download',fields=values)[1]==raw_zip
     assert fetch(fresh,base,'/confirmed-export/saved/preview?id='+old['id'])[0]==409
-    assert list(s.db.iterdump())==after and originals(s)==files
+    assert without_receipts(s)==after and originals(s)==files
     assert export.render_html(old_saved)==old_html and export.bundle(s,old_saved)==old_zip
     assert s.db.execute('PRAGMA quick_check').fetchone()[0]=='ok' and not s.db.execute('PRAGMA foreign_key_check').fetchall()
 

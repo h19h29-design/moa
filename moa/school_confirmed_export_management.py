@@ -7,6 +7,7 @@ from datetime import date
 import re
 
 from . import school_confirmed_export as batch, school_confirmed_export_saved as saved
+from . import school_confirmed_export_downloads as downloads
 from . import school_review as review, school_service as svc
 from .school_saved_queue import key, text
 
@@ -115,6 +116,10 @@ def listing(store, principal, *, q='', after='', before='', state='active', page
         pages=max(1,(total+PAGE_SIZE-1)//PAGE_SIZE);page=min(page,pages)
         rows=[dict(r) for r in store.db.execute(prefix+'SELECT * FROM visible'+where+
             ' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?',(*params,PAGE_SIZE,(page-1)*PAGE_SIZE))]
+        # Delivery counts come from the same read snapshot as the directory rows.
+        if rows and downloads.available(store):
+            marks=downloads.latest(store,principal,[r['id'] for r in rows])
+            for r in rows: r['download']=marks.get(r['id'])
         return {**empty,'rows':rows,'page':page,'pages':pages,'total':total}
 
 

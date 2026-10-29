@@ -196,7 +196,7 @@ class SchoolHandler(Handler):
             if path == '/structure-confirm':
                 from . import school_review_check_web
                 return school_review_check_web.render(self,urlsplit(self.path).query)
-            if path in ('/confirmed-export','/confirmed-export/preview','/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/saved/status','/confirmed-export/saved/manage'):
+            if path in ('/confirmed-export','/confirmed-export/preview','/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/saved/status','/confirmed-export/saved/manage','/confirmed-export/saved/receipts'):
                 from . import school_confirmed_export_web
                 return school_confirmed_export_web.dispatch(self,path,raw=urlsplit(self.path).query)
             if path == '/structure-compare':

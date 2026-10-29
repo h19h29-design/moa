@@ -1,4 +1,5 @@
 """Persistent owner-only lists; every resume/download rechecks the frozen pins."""
+import sqlite3
 from urllib.parse import urlencode
 
 from . import school_confirmed_export as batch, school_confirmed_export_saved as saved
@@ -50,7 +51,12 @@ def directory(handler, raw):
     for row in data['rows']:
         content+='<article class="card" data-export-saved-card><h2>'+esc(row['name'])+'</h2><p>'+('보관함' if row['state']=='archived' else '사용 중')+' · '+str(row['item_count'])+'건 · 목록 저장 '+esc(row['created_at'])+'</p>'
         content+='<a data-export-saved-resume href="'+esc(link(row['id']))+'">묶음 확인·이어서 다운로드</a> · <a data-export-status-link href="'+esc(status_link(row['id']))+'">문서별 상태·변경 확인</a>'
-        content+=' · <a data-export-manage href="'+esc(management_link(row['id']))+'">보관·복원 이력</a></article>'
+        content+=' · <a data-export-manage href="'+esc(management_link(row['id']))+'">보관·복원 이력</a>'
+        if 'download' in row:
+            mark=row['download']
+            content+='<p data-export-download-state>'+('다운로드 '+str(mark['total'])+'회 · 마지막 '+esc(mark['created_at'])
+                if mark else '아직 내려받지 않음')+'</p>'
+        content+='</article>'
     content+='<nav aria-label="저장한 묶음 페이지">'+str(data['page'])+' / '+str(data['pages'])+'페이지 · 총 '+str(data['total'])+'개'
     for page,label in ((data['page']-1,'이전 목록'),(data['page']+1,'다음 목록')):
         filters={k:v for k,v in (('q',f['q']),('from',f['after']),('to',f['before']),('state',f['state'] if f['state']!='active' else '')) if v}
@@ -71,6 +77,9 @@ def _blocked(handler, row):
 
 def dispatch(handler, path, *, raw=None, form=None):
     if form is None and path=='/confirmed-export/saved': return directory(handler,raw)
+    if form is None and path=='/confirmed-export/saved/receipts':
+        from .school_confirmed_export_downloads_web import render
+        return render(handler,raw)
     if form is not None and path=='/confirmed-export/save':
         if set(form)!={'csrf','bundle','name'} or any(len(v)!=1 for v in form.values()):
             raise ValueError('Invalid saved export fields')
@@ -92,4 +101,13 @@ def dispatch(handler, path, *, raw=None, form=None):
             return web.preview(handler,data,ident,saved_row=row)
         raw=batch.bundle(handler.store,handler._principal(),row['pins'])
     except (review.Conflict,LookupError): return _blocked(handler,row)
+    _receipt(handler,row['id'],raw)
     return handler._send_bytes(raw,'confirmed-notices.zip','application/zip')
+
+
+def _receipt(handler, ident, raw):
+    """Best-effort receipt for the validated bytes; never blocks the download."""
+    from . import school_confirmed_export_downloads as downloads
+    try: downloads.record(handler.store,handler._principal(),ident,raw)
+    except (sqlite3.Error,review.Conflict,LookupError,ValueError,PermissionError):
+        handler.store.db.rollback()

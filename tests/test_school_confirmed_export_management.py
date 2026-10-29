@@ -19,6 +19,7 @@ from test_web_school import school_web, client, fetch, login
 
 
 EVENTS = 'school_confirmed_export_list_events'
+RECEIPTS = 'school_confirmed_export_downloads'
 
 
 def frozen(s, p, *, ident=IDENT, name='합성 확인 완료본 묶음', pins=None):
@@ -29,11 +30,13 @@ def frozen(s, p, *, ident=IDENT, name='합성 확인 완료본 묶음', pins=Non
 
 
 def unchanged_rows(s):
-    return [line for line in s.db.iterdump() if not line.startswith('INSERT INTO "'+EVENTS+'"')]
+    return [line for line in s.db.iterdump()
+        if not line.startswith(('INSERT INTO "'+EVENTS+'"', 'INSERT INTO "'+RECEIPTS+'"'))]
 
 
 def drop_v8(s):
-    s.db.executescript('DROP TABLE '+EVENTS+'; DELETE FROM school_service_migrations WHERE version=8;')
+    s.db.executescript('DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE '+EVENTS+';'
+        ' DELETE FROM school_service_migrations WHERE version>=8;')
 
 
 def manage_url(ident=IDENT, **query):

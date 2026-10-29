@@ -400,9 +400,10 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     saved_form=BeautifulSoup(saved_export_preview,'html.parser').select_one('[data-export-download]')
     saved_ident=saved_form.select_one('[name=id]')['value']
     exclude_exports=lambda rows:[r for r in rows if not r.startswith((
-        'INSERT INTO "school_confirmed_export_lists"','INSERT INTO "school_confirmed_export_items"'))]
+        'INSERT INTO "school_confirmed_export_lists"','INSERT INTO "school_confirmed_export_items"',
+        'INSERT INTO "school_confirmed_export_downloads"'))]
     assert exclude_exports(list(store.db.iterdump()))==exclude_exports(batch_before)
-    saved_rows=list(store.db.iterdump())
+    saved_rows=exclude_exports(list(store.db.iterdump()))
     assert fetch(resumed_client,base,'/logout',fields={'csrf':resumed_csrf})[0]==200
     export_client=client();export_csrf=login(export_client,base)
     saved_directory=BeautifulSoup(fetch(export_client,base,'/confirmed-export/saved')[1],'html.parser')
@@ -415,7 +416,7 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     resume_fields={e['name']:e.get('value','') for e in resume_form.select('input[name]')}
     resume_fields['acknowledge']='yes';assert resume_fields['csrf']==export_csrf
     resume_zip_status,resume_zip,_=fetch(export_client,base,'/confirmed-export/saved/download',fields=resume_fields)
-    assert resume_zip_status==200 and resume_zip==batch_zip and list(store.db.iterdump())==saved_rows
+    assert resume_zip_status==200 and resume_zip==batch_zip and exclude_exports(list(store.db.iterdump()))==saved_rows
     assert fetch(export_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
     assert fetch(export_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))

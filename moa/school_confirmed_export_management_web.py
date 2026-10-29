@@ -2,6 +2,7 @@
 import re
 from urllib.parse import urlencode
 
+from . import school_confirmed_export_downloads as downloads
 from . import school_confirmed_export_management as management, school_service as svc
 from . import school_confirmed_export_web as web, school_review as review
 from .school_saved_queue_web import query, number
@@ -33,6 +34,16 @@ def render(handler, raw, *, status=200, warning=''):
         content+=_hidden('id',row['id'])+_hidden('expected',str(row['version']))
         content+='<label><input type="checkbox" name="acknowledge" value="yes" required> 원본·고정 목록을 유지한 채 표시 상태를 변경합니다.</label><button>'+label+'</button></form>'
     else: content+='<p>현재 계정은 읽기 전용입니다. 보관·복원은 변경 권한이 있는 담당자만 할 수 있습니다.</p>'
+    from .school_confirmed_export_downloads_web import link as receipt_link
+    receipts=downloads.listing(handler.store,principal,row['id'])
+    content+='<h2>다운로드 영수증</h2>'
+    if receipts['receipt_required']:
+        content+='<p>다운로드 영수증 기능의 명시적 마이그레이션이 필요합니다. 기존 다운로드는 계속 동작합니다.</p>'
+    else:
+        last=receipts['rows'][0] if receipts['rows'] else None
+        content+=('<p data-export-receipts-summary>'+('아직 내려받지 않음' if not receipts['total'] else
+            '다운로드 '+str(receipts['total'])+'회 · 마지막 '+esc(last['created_at']))+'</p>')
+        content+='<p><a data-export-receipts href="'+esc(receipt_link(row['id']))+'">다운로드 영수증 전체 보기</a></p>'
     content+='<h2>보관·복원 이력</h2><p>처음 저장 '+esc(row['created_at'])+' · 보관·복원 기록 '+str(row['total'])+'개</p><ol data-export-management-history>'
     for event in row['events']:
         content+='<li>#'+str(event['version'])+' · '+('보관함으로 이동' if event['action']=='archive' else '기본 목록으로 복원')+' · '+esc(event['created_at'])+'</li>'
