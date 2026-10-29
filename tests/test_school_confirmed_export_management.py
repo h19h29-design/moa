@@ -35,7 +35,7 @@ def unchanged_rows(s):
 
 
 def drop_v8(s):
-    s.db.executescript('DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE '+EVENTS+';'
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE '+EVENTS+';'
         ' DELETE FROM school_service_migrations WHERE version>=8;')
 
 

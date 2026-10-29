@@ -236,7 +236,7 @@ def test_receipt_insert_rejects_draft_from_other_owner_with_identical_payload(sc
 
 def test_v6_upgrade_is_explicit_additive_backed_up_and_v5_regular_review_still_works(schools):
     m,s,p,_=schools; receipt,_=converted(m,s,p); source=draft_save(s,p,receipt.version_id)
-    s.db.executescript('DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DELETE FROM school_service_migrations WHERE version>=6;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DELETE FROM school_service_migrations WHERE version>=6;')
     before=list(s.db.iterdump()); version=s.db.execute('PRAGMA user_version').fetchone()[0]; original=files(s)
     data=module().preview(s,p,source)
     assert not data['can_submit'] and 'handoff_migration_required' in data['submit_reasons']
@@ -339,7 +339,7 @@ def test_http_rechecks_owner_school_current_head_and_write_permission_after_prev
 
 def test_http_v5_missing_handoff_schema_never_upgrades_implicitly(school_web):
     s,base,a,p,receipt,source,doc,headers,values=http_setup(school_web)
-    s.db.executescript('DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DELETE FROM school_service_migrations WHERE version>=6;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DELETE FROM school_service_migrations WHERE version>=6;')
     before=list(s.db.iterdump());readonly,_=page(a,base,route(source))
     assert not readonly.select_one('[data-draft-submit-form]')
     assert fetch(a,base,'/structure-draft/submit',fields=values)[0]==409

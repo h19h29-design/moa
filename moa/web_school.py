@@ -93,7 +93,7 @@ class SchoolHandler(Handler):
         # Individual callers append the CSRF logout form to avoid mixing upload forms.
 
     def _shell(self, content):
-        return self._page('') + ' · <a href="/review-saved">저장한 검수 목록</a> · <a href="/structure-drafts">내 임시 저장 입력</a><form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
+        return self._page('') + ' · <a href="/review-saved">저장한 검수 목록</a> · <a href="/structure-drafts">내 임시 저장 입력</a> · <a href="/structure-warning-searches">저장한 경고 검색 조건</a><form action="/logout" method="post">'+self._csrf_field()+'<button>로그아웃</button></form></nav><main>'+content+'</main>'
 
     def _home(self, query):
         principal = self._principal()
@@ -209,6 +209,9 @@ class SchoolHandler(Handler):
             if path == '/structure-warnings':
                 from . import school_warning_search_web
                 return school_warning_search_web.render(self,urlsplit(self.path).query)
+            if path in ('/structure-warning-searches','/structure-warning-searches/open'):
+                from . import school_warning_searches_web
+                return school_warning_searches_web.dispatch(self,path,raw=urlsplit(self.path).query)
             if path == '/': return self._home(school_overview_web.query(urlsplit(self.path).query))
             q = parse_qs(urlsplit(self.path).query)
             ident = q.get('id', [''])[0]
@@ -245,6 +248,7 @@ class SchoolHandler(Handler):
             if path in ('/structure-draft/restore','/structure-draft/submit'): maximum = 4096
             if path == '/structure-confirm': maximum = 32768
             if path == '/confirmed-export/receipt-searches/save': maximum = 8192
+            if path == '/structure-warning-searches/save': maximum = 8192
             if path in ('/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore'): maximum = 16384
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
@@ -253,11 +257,15 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit','/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore','/confirmed-export/receipt-searches/save'), max_num_fields=80, errors='strict')
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-warning-searches/save','/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit','/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore','/confirmed-export/receipt-searches/save'), max_num_fields=80, errors='strict')
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
             if path == '/logout': return self._logout()
+            if path == '/structure-warning-searches/save':
+                if urlsplit(self.path).query: raise ValueError('Unexpected warning search query')
+                from . import school_warning_searches_web
+                return school_warning_searches_web.dispatch(self,path,form=form)
             if path == '/confirmed-export/receipt-searches/save':
                 if urlsplit(self.path).query: raise ValueError('Unexpected receipt search query')
                 from . import school_receipt_searches_web

@@ -25,12 +25,12 @@ SEARCH = 's'*24
 
 def existing_rows(s):
     tables = [r[0] for r in s.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
-              if r[0] not in ('school_receipt_searches','school_service_migrations')]
+              if r[0] not in ('school_receipt_searches','school_warning_searches','school_service_migrations')]
     return {name: [tuple(r) for r in s.db.execute('SELECT * FROM "'+name+'"')] for name in tables}
 
 
 def drop_v10(s):
-    s.db.executescript('DROP TABLE school_receipt_searches; DELETE FROM school_service_migrations WHERE version=10;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_searches; DROP TABLE school_receipt_searches; DELETE FROM school_service_migrations WHERE version>=10;')
 
 
 def test_v9_upgrade_backs_up_all_history_and_never_changes_existing_rows(schools):
@@ -46,7 +46,7 @@ def test_v9_upgrade_backs_up_all_history_and_never_changes_existing_rows(schools
         assert before.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0] == 9
     assert saved.available(s) and existing_rows(s)==old and originals(s)==files
     assert s.db.execute('PRAGMA user_version').fetchone()[0] == version
-    assert [r[0] for r in s.db.execute('SELECT version FROM school_service_migrations ORDER BY version')] == list(range(1,11))
+    assert [r[0] for r in s.db.execute('SELECT version FROM school_service_migrations ORDER BY version')] == list(range(1,12))
     after = list(s.db.iterdump())
     assert svc.migrate(s) is None and list(s.db.iterdump())==after
     assert s.db.execute('PRAGMA quick_check').fetchone()[0]=='ok'

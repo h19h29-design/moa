@@ -45,6 +45,9 @@ def render(handler, raw):
         '<p>제목·설명·확인할 내용·파일 위치·언급된 첨부 이름·경고 코드를 글자 그대로 검색합니다. '
         '대소문자는 구분하지 않으며, 파일·유형 옆 건수는 검색 전 전체 경고 기준입니다.</p>',
         '<p data-warning-summary>전체 경고 '+str(data['all_total'])+'건 · 검색 결과 '+str(data['total'])+'건</p>'])
+    from . import school_warning_searches_web as saved_web
+    content.append('<p><a data-warning-search-directory href="'+saved_web.PATH+'">저장한 경고 검색 조건 불러오기</a></p>')
+    content.append(saved_web.save_form(handler,data))
     if data['rows']:
         content.append('<p data-warning-range>원래 분석 순서를 유지합니다. 현재 페이지는 검색 결과 중 '+
             str((data['page']-1)*search.PAGE_SIZE+1)+'–'+str(min(data['page']*search.PAGE_SIZE,data['total']))+'번째 항목입니다.</p>')

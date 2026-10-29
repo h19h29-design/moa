@@ -282,7 +282,7 @@ def test_http_history_queries_are_strict_bounded_and_nonmutating(school_web,rout
 
 def test_missing_schema_does_not_trigger_migration_on_history_get(school_web):
     _,s,base=school_web; a=client(); login(a,base)
-    s.db.executescript('DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
     before=list(s.db.iterdump())
     for route in (history_path('0'*32),pair_path('0'*32,'1'*32)):
         assert fetch(a,base,route)[0]==409
