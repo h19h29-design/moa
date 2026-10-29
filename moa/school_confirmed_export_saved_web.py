@@ -37,6 +37,7 @@ def directory(handler, raw):
     f=data['filters']
     content=web.STYLE+'<section class="comparison" id="saved-confirmed-exports"><h1>저장한 확인 완료본 묶음</h1>'
     content+='<p>내 학교·내 담당자 계정에만 보이는 비공개 목록입니다. 재로그인·서버 재시작 후에도 이어서 다운로드할 수 있습니다.</p>'
+    content+='<p><a data-receipt-overview-link href="/confirmed-export/receipts">내 다운로드 영수증 모아보기</a></p>'
     content+='<p>저장 시점의 문서 순서와 확인 버전을 유지합니다. 열기·다운로드 때 다시 검사하며, 달라진 버전으로 자동 대체하지 않습니다.</p>'
     content+='<p>보관함으로 옮긴 목록은 기본 목록에서 숨기며 삭제하지 않습니다. 기간은 한국 시간의 목록 저장일 기준이며 양 끝 날짜를 포함합니다.</p>'
     content+='<form method="get" action="/confirmed-export/saved" data-export-saved-filters><label>목록 이름 검색<input type="search" name="q" maxlength="120" value="'+esc(f['q'])+'"></label>'

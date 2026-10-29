@@ -83,5 +83,7 @@ def render(handler, raw):
         if 1 <= page <= data['pages']: content += ' · <a href="'+esc(link(row['id'], page=page, **filters))+'">'+label+'</a>'
     content += '</nav><p><a data-export-saved-resume href="'+esc(preview_link(row['id']))+'">고정 묶음 확인·다운로드</a>'
     content += ' · <a href="'+esc(management_link(row['id']))+'">보관·복원 이력</a>'
+    from .school_receipt_overview_web import link as overview_link
+    content += ' · <a data-receipt-overview-link href="'+esc(overview_link(**filters))+'">내 영수증 모아보기</a>'
     content += ' · <a href="/confirmed-export/saved">저장한 묶음 목록</a></p></section>'
     return handler._send(handler._shell(content))
