@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from . import mobile, school_service as svc, school_review, school_review_web, school_export_web, school_compare_web, school_restore_web
 from . import school_overview, school_overview_web, school_queue_web, school_saved_queue_web, school_draft_web
+from . import school_warning_web as warnings_ui
 from .web import Handler, PAGE, esc
 from .web_mobile import parse_upload
 
@@ -149,14 +150,15 @@ class SchoolHandler(Handler):
         content += '<p><a href="/structure-review?id='+quote(ident)+'&amp;revision='+quote(analysis['conversion_revision'])+'">담당자 수정본·검수 이력 열기</a> (아래 자동 분석 원본은 보존됩니다.)</p>'
         names = {f['id']:f['filename'] for f in analysis['files']}
         content += '<h2>파일 묶음·처리 상태</h2><ul>'
-        for f in analysis['files']:
-            content += '<li>'+esc(f['filename'])+' · '+esc(f['role'])+' · '+esc(f['status'])+' · 구역 '+str(f['block_count'])+'</li>'
+        for number,f in enumerate(analysis['files'],1):
+            content += '<li id="'+warnings_ui.anchor('file',f['id'])+'">파일 '+str(number)+' · '+esc(f['filename'])+' · '+esc(f['role'])+' · '+esc(f['status'])+' · 구역 '+str(f['block_count'])+'</li>'
         content += '</ul><h2>미확정·누락 확인</h2>'
-        for warning in analysis['warnings']:
-            content += '<p>'+esc(warning['code'])+' · '+esc(names.get(warning.get('file_id'),'묶음'))+' · '+esc(warning.get('reference',''))+'</p>'
+        content += warnings_ui.render(analysis,ident)
         content += '<h2>구역과 원본 위치</h2>'
+        ordinals = {}
         for block in analysis['blocks']:
-            content += '<section class="card"><h3>'+esc(names[block['file_id']])+' · '+esc(block['id'])+' · '+esc(labels[block['kind']])+'</h3>'
+            fid = block['file_id']; ordinals[fid] = ordinals.get(fid,0)+1
+            content += '<section class="card" id="'+warnings_ui.anchor('block',block['id'])+'"><h3>'+esc(names[fid])+' · 자동 분석 구역 '+str(ordinals[fid])+' · '+esc(labels[block['kind']])+'</h3>'
             content += '<p>'+esc(block['basis'])+' · '+esc(block['certainty'])+'</p><pre style="white-space:pre-wrap">'+esc(block['text'])+'</pre><p>'+esc(json.dumps(block['locator'],ensure_ascii=False))+'</p></section>'
         content += '<h2>구역·첨부 관계</h2><table><tr><th>관계</th><th>출발 → 대상</th><th>근거·확실성</th></tr>'
         for relation in analysis['relations']:

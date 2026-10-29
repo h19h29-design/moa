@@ -2,6 +2,7 @@
 from urllib.parse import urlencode
 
 from . import school_review_export as export
+from . import school_warning_web as warnings_ui
 from .school_review_compare import link as compare_link
 from .web import esc
 
@@ -37,4 +38,6 @@ def serve(handler, route, query):
     content += '<p><a href="'+esc(compare_link(field('id'),field('revision'),'original',field('event')))+'">자동 분석본과 변경점 비교</a></p>'
     from .school_review_check_web import link as check_link
     content += '<p><a data-final-check href="'+esc(check_link(field('id'),field('revision'),field('event')))+'">확인 전 변경 요약·HTML 검토</a></p>'
+    content += '<h2>보존된 분석 경고 안내</h2>'
+    content += warnings_ui.render(saved['analysis'],field('id'))
     return handler._send(handler._shell(content))

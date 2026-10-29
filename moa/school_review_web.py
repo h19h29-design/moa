@@ -3,6 +3,7 @@ import json
 from urllib.parse import quote
 
 from . import school_review as review
+from . import school_warning_web as warnings_ui
 from . import school_queue_web, school_review_drafts as drafts, school_draft_web
 from .school_review_compare import link as compare_link
 from .school_export_web import link as export_link
@@ -134,8 +135,7 @@ def render(handler, ident, query, *, queue=None, draft=None):
     for f in a['files']:
         content += '<li>'+esc('file:'+f['id'])+' · '+esc(f['filename'])+' · '+esc(f['role'])+' · '+esc(f['status'])+'</li>'
     content += '</ul><p>자동 분석 완전성: '+('완전' if a['complete'] else '일부 미확정·누락 있음')+' — 확인 후에도 원래 경고를 보존합니다.</p>'
-    for warning in a['warnings']:
-        content += '<p>'+esc(json.dumps(warning,ensure_ascii=False))+'</p>'
+    content += warnings_ui.render(original,ident)
     if v['editable']:
         if v['status']!='confirmed':
             content += _form(handler,ident,v,'confirm',queue)+'<label><input type="checkbox" name="acknowledge_warnings" value="yes" required> 파일·구역·관계와 미확정/누락 범위를 확인했습니다. 누락 없는 문서임을 보증하는 확인은 아닙니다.</label>'+_reason('이 구조 버전 확인 완료')

@@ -2,6 +2,7 @@
 from urllib.parse import urlencode
 
 from . import school_review as review, school_review_compare as compare
+from . import school_service as svc, school_warning_web as warnings_ui
 from .core import encode
 from .web import esc
 
@@ -162,6 +163,7 @@ def render(handler, query):
     for f in data['files']: page.add('<li>'+esc('file:'+f['id'])+' · '+esc(f['filename'])+' · '+esc(f['role'])+' · '+esc(f['status'])+'</li>')
     page.add('</ul><p>자동 분석 완전성: '+('완전' if data['complete'] else '일부 미확정·누락 있음')+' (검수 후에도 원래 경고를 보존)</p>')
     _pages(page,data,'warnings',params)
-    for warning in data['warnings']['items']: page.add('<p>'+esc(encode(warning))+'</p>')
+    original=svc.structure_for(handler.store,handler._principal(),field('id'),revision_id=field('revision'))
+    page.add(warnings_ui.render(original,field('id'),warnings=data['warnings']['items']))
     page.add('</div>')
     return handler._send(handler._shell(page.text()))

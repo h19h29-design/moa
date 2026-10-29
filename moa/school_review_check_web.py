@@ -2,6 +2,7 @@
 from urllib.parse import urlencode
 
 from . import school_review_check as check
+from . import school_warning_web as warnings_ui
 from .school_saved_queue_web import query
 from .school_export_web import link as export_link
 from .school_review_compare import link as compare_link
@@ -41,9 +42,7 @@ def render(handler, raw):
     content+='<p>자동 분석 완전성: '+('완전' if a['complete'] else '일부 미확정·누락 있음')+' · 경고 '+str(len(a['warnings']))+'개</p><ul>'
     for f in a['files']: content+='<li>'+esc(f['filename'])+' · '+esc(f['role'])+' · '+esc(f['status'])+'</li>'
     content+='</ul></section></div><section class="card" data-check-warnings><h2>보존되는 경고·미확정 범위</h2>'
-    if not a['warnings']: content+='<p>기록된 자동 분석 경고가 없습니다. 원본과의 대조는 필요합니다.</p>'
-    for w in a['warnings']:
-        content+='<p>'+esc(w['code'])+' · '+esc(w.get('file_id','묶음'))+' · '+esc(w.get('reference',''))+'</p>'
+    content+=warnings_ui.render(v['original'],ident)
     content+='</section><section class="card"><h2>이 정식 검수본의 HTML</h2><p><a href="'+esc(html_url)+'">HTML 크게 보기</a> · <a href="'+esc(html_url)+'&amp;download=1">HTML 다운로드</a> · <a href="'+esc(export_link('/review-bundle',ident,revision,event))+'">HTML·원본 ZIP 다운로드</a></p>'
     content+='<iframe title="최종 검토할 정식 수정본 HTML" sandbox src="'+esc(html_url)+'" style="height:60vh"></iframe></section>'
     if data['can_confirm']:
