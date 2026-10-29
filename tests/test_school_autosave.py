@@ -125,7 +125,7 @@ def test_only_editable_draft_forms_get_autosave_and_no_read_writes_schema(school
     svc.grant_member(s,'A','a','reader')
     assert not page(a,base,'/structure-review?id='+receipt.version_id)[0].select('[data-draft-autosave]')
     svc.grant_member(s,'A','a','uploader')
-    s.db.executescript('DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
     before=list(s.db.iterdump())
     assert not page(a,base,'/structure-review?id='+receipt.version_id)[0].select('[data-draft-autosave]')
     assert fetch(a,base,PATH,fields=inputs(form(doc)))[0]==409

@@ -82,17 +82,9 @@ def create(store, principal, ident, *, name, notice, revision, q='', file='', co
     return ident
 
 
-def listing(store, principal, *, page=1):
-    if type(page) is not int or not 1<=page<=1_000_000: raise ValueError('Invalid saved warning page')
-    with _snapshot(store):
-        svc.require_member(store,principal)
-        if not available(store): return dict(rows=[],page=1,pages=1,total=0,migration_required=True)
-        params=(principal.school,principal.subject)
-        total=store.db.execute('SELECT count(*) FROM school_warning_searches WHERE school=? AND subject=?',params).fetchone()[0]
-        pages=max(1,(total+PAGE_SIZE-1)//PAGE_SIZE); page=min(page,pages)
-        rows=[_row(r) for r in store.db.execute('SELECT * FROM school_warning_searches WHERE school=? AND subject=?'
-            ' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?',(*params,PAGE_SIZE,(page-1)*PAGE_SIZE))]
-        return dict(rows=rows,page=page,pages=pages,total=total,migration_required=False)
+def listing(store, principal, *, q='', state='active', page=1):
+    from . import school_warning_search_management as management
+    return management.listing(store,principal,q=q,state=state,page=page)
 
 
 def resolve(store, principal, ident):

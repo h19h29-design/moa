@@ -267,7 +267,7 @@ def test_missing_v4_schema_is_never_installed_by_read_or_save_then_explicit_upgr
     _,s,base=school_web; a=client(); login(a,base); p=svc.Principal('A','a')
     receipt,_=converted(svc,s,p)
     formal_save(review,s,p,receipt.version_id,{'kind':'confirm','acknowledge_warnings':True})
-    s.db.executescript('DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DROP TABLE school_review_drafts; DELETE FROM school_service_migrations WHERE version>=4;')
     before=list(s.db.iterdump()); version=s.db.execute('PRAGMA user_version').fetchone()[0]
     web_school.make_handler(s,{})
     doc,_=page(a,base,'/structure-review?id='+receipt.version_id)
