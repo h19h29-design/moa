@@ -54,6 +54,9 @@ def render(handler, raw):
     for value,label in (('all','전체'),('active','사용 중'),('archived','보관함')):
         content += '<option value="'+value+'"'+(' selected' if f['state']==value else '')+'>'+label+'</option>'
     content += '</select></label><button>영수증 검색</button> <a href="'+PATH+'">검색 초기화</a></form>'
+    from . import school_receipt_searches_web as searches
+    content += '<p><a data-receipt-search-directory href="'+searches.PATH+'">저장한 검색 조건 불러오기</a></p>'
+    if not data['migration_required']: content += searches.save_form(handler, f)
     if data['migration_required']:
         content += '<p data-receipt-overview-required>저장 묶음·보관 이력·영수증 기능의 명시적 마이그레이션이 필요합니다. 이 화면은 DB를 변경하지 않습니다.</p>'
     else:

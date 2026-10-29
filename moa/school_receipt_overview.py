@@ -10,12 +10,18 @@ from .school_saved_queue import text
 PAGE_SIZE = 20
 
 
-def _selection(principal, q, after, before, state):
-    """Share exact filters and owner scope between the screen and CSV."""
+def filters(*, q='', after='', before='', state='all'):
+    """Canonical conditions shared by live search, CSV and saved searches."""
     q = text(q, 120); after = management._date(after); before = management._date(before)
     if state not in ('all', 'active', 'archived') or after and before and after > before:
         raise ValueError('Invalid receipt overview filter')
-    filters = dict(q=q, after=after, before=before, state=state)
+    return dict(q=q, after=after, before=before, state=state)
+
+
+def _selection(principal, q, after, before, state):
+    """Share exact filters and owner scope between the screen and CSV."""
+    selected = filters(q=q, after=after, before=before, state=state)
+    q, after, before, state = (selected[k] for k in ('q','after','before','state'))
     prefix = ("WITH visible AS (SELECT d.list_id,l.name,d.version,d.created_at,d.item_count,"
         "d.zip_bytes,d.zip_sha256,CASE WHEN (SELECT e.action FROM school_confirmed_export_list_events e"
         " WHERE e.list_id=l.id AND e.school=l.school AND e.subject=l.subject"
@@ -31,7 +37,7 @@ def _selection(principal, q, after, before, state):
     if before: clauses.append('substr(created_at,1,10)<=?'); params.append(before)
     if state != 'all': clauses.append('state=?'); params.append(state)
     where = ' WHERE '+' AND '.join(clauses) if clauses else ''
-    return filters, prefix, where, params
+    return selected, prefix, where, params
 
 
 def _available(store):

@@ -31,7 +31,7 @@ def frozen(s, p, *, ident=IDENT, name='합성 확인 완료본 묶음', pins=Non
 
 
 def drop_v9(s):
-    s.db.executescript('DROP TABLE '+RECEIPTS+'; DELETE FROM school_service_migrations WHERE version>=9;')
+    s.db.executescript('DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE '+RECEIPTS+'; DELETE FROM school_service_migrations WHERE version>=9;')
 
 
 def without_receipts(s):

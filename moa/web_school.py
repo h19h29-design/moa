@@ -196,6 +196,9 @@ class SchoolHandler(Handler):
             if path == '/structure-confirm':
                 from . import school_review_check_web
                 return school_review_check_web.render(self,urlsplit(self.path).query)
+            if path in ('/confirmed-export/receipt-searches','/confirmed-export/receipt-searches/open'):
+                from . import school_receipt_searches_web
+                return school_receipt_searches_web.dispatch(self,path,raw=urlsplit(self.path).query)
             if path in ('/confirmed-export','/confirmed-export/preview','/confirmed-export/receipts','/confirmed-export/receipts.csv','/confirmed-export/saved','/confirmed-export/saved/preview','/confirmed-export/saved/status','/confirmed-export/saved/manage','/confirmed-export/saved/receipts','/confirmed-export/saved/receipts.csv'):
                 from . import school_confirmed_export_web
                 return school_confirmed_export_web.dispatch(self,path,raw=urlsplit(self.path).query)
@@ -236,6 +239,7 @@ class SchoolHandler(Handler):
             maximum = mobile.MAX_UPLOAD_BYTES + 1_000_000 if path == '/upload' else (300_000 if path in ('/structure-review','/structure-draft/save','/structure-draft/autosave') else 200_000)
             if path in ('/structure-draft/restore','/structure-draft/submit'): maximum = 4096
             if path == '/structure-confirm': maximum = 32768
+            if path == '/confirmed-export/receipt-searches/save': maximum = 8192
             if path in ('/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore'): maximum = 16384
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
@@ -244,11 +248,15 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit','/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore'), max_num_fields=80, errors='strict')
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit','/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore','/confirmed-export/receipt-searches/save'), max_num_fields=80, errors='strict')
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
             if path == '/logout': return self._logout()
+            if path == '/confirmed-export/receipt-searches/save':
+                if urlsplit(self.path).query: raise ValueError('Unexpected receipt search query')
+                from . import school_receipt_searches_web
+                return school_receipt_searches_web.dispatch(self,path,form=form)
             if path == '/structure-review': return school_review_web.submit(self,form)
             if path == '/structure-confirm':
                 from . import school_review_check_web
