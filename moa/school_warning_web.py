@@ -131,19 +131,23 @@ def describe(analysis, ident, *, warnings=None):
         if locator: evidence['locator'] = locator
         items.append(dict(title=title, explanation=explanation, action=action,
             location=location, href=href, link_text=link_text,
+            file_id=fid if file else '', code=code,
             # Note references are often internal IDs, not visible footnote text.
             reference=_key(warning.get('reference')) if code in ('unresolved_attachment','ambiguous_attachment') else '',
             evidence=evidence))
     return items
 
 
-def render(analysis, ident, *, warnings=None):
+def render(analysis, ident, *, warnings=None, directory=True):
     items = describe(analysis, ident, warnings=warnings)
     parts = [STYLE, '<section class="school-warnings" aria-label="분석 경고 안내">',
         '<p>자동 분석 당시의 확인 항목입니다. 수정·확인 후에도 원래 경고는 보존됩니다. '
         '아래 위치 링크는 같은 변환 버전의 자동 분석 근거를 엽니다.</p>',
         '<p>자동 분석 구역 번호는 이 화면의 추출 순서이며 원본의 쪽·문단 번호가 아닙니다. '
         'PDF 쪽수는 확인된 경우에만 표시하고, 추출 텍스트 줄은 원본의 인쇄 줄과 다를 수 있습니다.</p>']
+    if directory:
+        href = '/structure-warnings?'+urlencode({'id':ident, 'revision':analysis['conversion_revision']})
+        parts.append('<p><a data-warning-directory href="'+esc(href)+'">이 변환본의 분석 경고 모아보기·검색</a></p>')
     if not items: parts.append('<p>기록된 자동 분석 경고가 없습니다. 원본과의 대조는 필요합니다.</p>')
     for item in items:
         parts.append('<article class="warning-card"><h3>'+esc(item['title'])+'</h3>'

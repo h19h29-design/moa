@@ -107,8 +107,8 @@ def test_warning_text_and_evidence_cannot_inject_markup_or_external_links():
     a['warnings']=[dict(code=attack,file_id=attack,block_id=attack,reference='javascript:'+attack)]
     raw=ui.render(a,'notice&revision=wrong'); page=BeautifulSoup(raw,'html.parser')
     assert not page.select('img,script,iframe,[onerror]')
-    assert attack in page.get_text() and len(page.select('a'))==1
-    href=urlsplit(page.a['href'])
+    assert attack in page.get_text() and len(page.select('a'))==2
+    href=urlsplit(page.select_one('[data-warning-location]')['href'])
     assert not href.netloc and href.path=='/structure'
     assert parse_qs(href.query)=={'id':['notice&revision=wrong'],'revision':['old-conversion']}
     assert href.fragment==ui.anchor('block',attack) and '<' not in href.fragment

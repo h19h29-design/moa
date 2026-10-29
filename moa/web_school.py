@@ -206,6 +206,9 @@ class SchoolHandler(Handler):
                 return school_confirmed_export_web.dispatch(self,path,raw=urlsplit(self.path).query)
             if path == '/structure-compare':
                 return school_compare_web.render(self,parse_qs(urlsplit(self.path).query,keep_blank_values=True,max_num_fields=10))
+            if path == '/structure-warnings':
+                from . import school_warning_search_web
+                return school_warning_search_web.render(self,urlsplit(self.path).query)
             if path == '/': return self._home(school_overview_web.query(urlsplit(self.path).query))
             q = parse_qs(urlsplit(self.path).query)
             ident = q.get('id', [''])[0]
