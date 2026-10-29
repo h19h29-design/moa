@@ -47,7 +47,8 @@ def main(argv=None):
     with Store(args.data, thread_safe=args.command == 'serve') as store:
         if args.command == 'migrate':
             backup = svc.migrate(store)
-            print('school_schema=2; backup=' + (str(backup) if backup else 'already_applied'))
+            version = store.db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]
+            print('school_schema=' + str(version) + '; backup=' + (str(backup) if backup else 'already_applied'))
         elif args.command == 'configure':
             config = _json(args.config)
             for item in config['schools']:

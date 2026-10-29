@@ -3,11 +3,13 @@
 HWPX/PDF are generated synthetic documents. Legacy binary HWP is an optional
 already-acquired private fixture; never embed its bytes or text in this repo.
 """
+import csv
 import io
 import json
 import os
 from pathlib import Path
 import re
+from urllib.parse import urlencode
 import zipfile
 
 import pytest
@@ -421,6 +423,54 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     assert fetch(export_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
     assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
         for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
+    # Continue the same actual-parser journey through the receipt search UI.
+    # The stored receipt must describe the bytes actually downloaded above.
+    receipt_baseline=list(store.db.iterdump())
+    receipt_page=BeautifulSoup(fetch(export_client,base,'/confirmed-export/receipts?'+urlencode({'q':'형식별'}))[1],'html.parser')
+    csv_url=receipt_page.select_one('[data-receipt-overview-csv]')['href']
+    receipt_status,receipt_csv,_=fetch(export_client,base,csv_url)
+    csv_rows=list(csv.reader(io.StringIO(receipt_csv.decode('utf-8-sig'))))
+    assert receipt_status==200 and len(csv_rows)==2
+    assert csv_rows[1][0]==saved_ident and csv_rows[1][4:7]==['1',str(len(resume_zip)),digest(resume_zip)]
+    search_form=receipt_page.select_one('[data-receipt-search-save]')
+    search_fields={e['name']:e.get('value','') for e in search_form.select('input[name]')}
+    search_fields['name']='형식별 통합 검증 영수증'
+    search_status,search_html,_=fetch(export_client,base,'/confirmed-export/receipt-searches/save',fields=search_fields)
+    search_card=BeautifulSoup(search_html,'html.parser').select_one('[data-receipt-search-card]')
+    assert search_status==200 and search_card is not None
+    search_url=search_card.select_one('[data-receipt-search-open]')['href']
+    search_csv_url=search_card.select_one('[data-receipt-search-csv]')['href']
+    without_searches=lambda rows:[r for r in rows if not r.startswith('INSERT INTO "school_receipt_searches"')]
+    assert without_searches(list(store.db.iterdump()))==without_searches(receipt_baseline)
+    assert fetch(export_client,base,'/logout',fields={'csrf':export_csrf})[0]==200
+    report_client=client();report_csrf=login(report_client,base)
+    before_reports=list(store.db.iterdump())
+    loaded_status,loaded_search,_=fetch(report_client,base,search_url)
+    assert loaded_status==200
+    loaded_page=BeautifulSoup(loaded_search,'html.parser')
+    assert loaded_page.select_one('[name=q]')['value']=='형식별'
+    assert fetch(report_client,base,search_csv_url)[1]==receipt_csv
+    other_client=client();login(other_client,base,user='b',password='synthetic-b-only')
+    assert fetch(other_client,base,search_url)[0]==404
+    assert fetch(other_client,base,saved_link)[0]==404
+    assert list(store.db.iterdump())==before_reports
+    # A later formal reopening invalidates the entire saved ZIP, while the
+    # earlier confirmation, original bytes and receipt remain available.
+    current=structure_review.view(store,svc.Principal('A','a'),ident)
+    reopen_status,_,_=fetch(report_client,base,'/structure-review',fields={
+        'csrf':report_csrf,'id':ident,'revision':version['revision'],'base_hash':current['base_hash'],
+        'expected_review':current['latest']['id'],'action':'reopen','comment':'통합 검증 후 추가 검수'})
+    assert reopen_status==200
+    after_reopen=list(store.db.iterdump())
+    blocked_status,_,blocked_headers=fetch(report_client,base,'/confirmed-export/saved/download',fields={
+        **resume_fields,'csrf':report_csrf})
+    assert blocked_status==409 and 'Content-Disposition' not in blocked_headers
+    assert fetch(report_client,base,search_csv_url)[1]==receipt_csv
+    assert list(store.db.iterdump())==after_reopen
+    assert fetch(report_client,base,'/review-html'+pinned+'&download=1')[1]==reviewed_html
+    assert fetch(report_client,base,'/review-bundle'+pinned)[1]==reviewed_zip
+    assert {str(p):(p.stat().st_mtime_ns,digest(p.read_bytes()))
+        for folder in ('objects','extracted') for p in (store.root/folder).rglob('*') if p.is_file()}==files_before
     evidence = Path(os.environ.get('MOA_FORMAT_EVIDENCE_DIR', store.root/'format-evidence'))/kind
     evidence.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(evidence/('original.'+kind), raw)
@@ -436,6 +486,8 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
     atomic_write(evidence/'saved-batch-preview.html',saved_export_preview)
     atomic_write(evidence/'resumed-batch-preview.html',resume_export_preview)
     atomic_write(evidence/'resumed-batch.zip',resume_zip)
+    atomic_write(evidence/'saved-search-relogin.html',loaded_search)
+    atomic_write(evidence/'download-receipts.csv',receipt_csv)
     atomic_write(evidence/'comparison.html',comparison_html)
     atomic_write(evidence/'restore-preview.html',restore_preview)
     atomic_write(evidence/'restored.html',restored_html)
@@ -461,6 +513,9 @@ def test_actual_upload_roles_html_and_original_zip(school_web, kind):
         'http_saved_export':saved_export_status,'http_saved_export_resume':resume_export_status,
         'http_saved_export_zip':resume_zip_status,'saved_export_logout_recovery_byte_identical':True,
         'saved_export_only_list_rows_appended':True,'saved_export_originals_history_preserved':True,
+        'receipt_matches_actual_download_bytes':True,'saved_search_relogin_csv_identical':True,
+        'saved_search_and_batch_other_school_denied':True,'later_review_blocks_saved_zip':blocked_status,
+        'blocked_download_preserves_originals_old_exports_and_receipts':True,
         'reviewed_edit_visible':True,'reviewed_zip_originals_sha256_verified':True,
         'http_comparison':comparison_status,'http_comparison_json':json_status,
         'comparison_changed_blocks':comparison['summary']['changed_blocks'],
