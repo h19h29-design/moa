@@ -30,12 +30,12 @@ def seed(s,p,*,name='CAFÉ Straße A_%'):
 
 def protected(s):
     tables=[r[0] for r in s.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        if r[0] not in ('school_warning_search_events','school_service_migrations')]
+        if r[0] not in ('school_warning_search_names','school_warning_search_events','school_service_migrations')]
     return {n:[tuple(r) for r in s.db.execute('SELECT * FROM "'+n+'"')] for n in tables}
 
 
 def drop_v12(s):
-    s.db.executescript('DROP TABLE school_warning_search_events; DELETE FROM school_service_migrations WHERE version=12;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_names; DROP TABLE school_warning_search_events; DELETE FROM school_service_migrations WHERE version>=12;')
 
 
 def test_v11_migration_backs_up_all_existing_data_and_preserves_receipts(schools):
@@ -47,7 +47,7 @@ def test_v11_migration_backs_up_all_existing_data_and_preserves_receipts(schools
         assert list(db.iterdump())==dump and db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]==11
     assert protected(s)==before and originals(s)==files
     assert s.db.execute('PRAGMA user_version').fetchone()[0]==core
-    assert s.db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]==12
+    assert s.db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]==13
     dump=list(s.db.iterdump()); assert svc.migrate(s) is None and list(s.db.iterdump())==dump
     assert s.db.execute('PRAGMA quick_check').fetchone()[0]=='ok' and not s.db.execute('PRAGMA foreign_key_check').fetchall()
 

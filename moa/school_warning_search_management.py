@@ -56,7 +56,8 @@ def _metadata(store,principal,ident):
             ' WHERE search_id=? AND school=? AND subject=? ORDER BY version DESC LIMIT 1',
             (ident,principal.school,principal.subject)).fetchone()
         if event: row.update(version=event['version'],state='archived' if event['action']=='archive' else 'active')
-    return row
+    from . import school_warning_search_names as names
+    return names.decorate(store,row)
 
 
 def get(store,principal,ident,*,page=1):
@@ -81,20 +82,24 @@ def listing(store,principal,*,q='',state='active',page=1):
         if empty['migration_required']: return empty
         version='COALESCE((SELECT max(e.version) FROM school_warning_search_events e WHERE e.search_id=s.id),0)' if installed else '0'
         action="(SELECT e.action FROM school_warning_search_events e WHERE e.search_id=s.id ORDER BY e.version DESC LIMIT 1)='archive'" if installed else '0'
-        prefix=('WITH visible AS (SELECT s.*,'+version+" AS version,CASE WHEN "+action+
+        from . import school_warning_search_names as names
+        named=names.available(store)
+        display="COALESCE((SELECT name FROM school_warning_search_names n WHERE n.search_id=s.id ORDER BY version DESC LIMIT 1),s.name)" if named else 's.name'
+        name_version='COALESCE((SELECT max(n.version) FROM school_warning_search_names n WHERE n.search_id=s.id),0)' if named else '0'
+        prefix=('WITH visible AS (SELECT s.*,'+display+' AS display_name,'+name_version+' AS name_version,'+version+" AS version,CASE WHEN "+action+
             " THEN 'archived' ELSE 'active' END AS state FROM school_warning_searches s WHERE s.school=? AND s.subject=?) ")
         clauses=[];params=[principal.school,principal.subject]
         if selected['q']:
             # Connection-local pure scalar function: no schema or cached result writes.
             store.db.create_function('moa_warning_condition_key',1,_fold,deterministic=True)
-            fields=('name','title','q','file_label','code_label','file_filter','code_filter')
+            fields=('name','display_name','title','q','file_label','code_label','file_filter','code_filter')
             clauses.append('instr(moa_warning_condition_key('+('||char(10)||'.join(fields))+'),?)>0')
             params.append(_fold(selected['q']))
         if state!='all': clauses.append('state=?');params.append(state)
         where=' WHERE '+' AND '.join(clauses) if clauses else ''
         total=store.db.execute(prefix+'SELECT count(*) FROM visible'+where,params).fetchone()[0]
         pages=max(1,(total+PAGE_SIZE-1)//PAGE_SIZE);page=min(page,pages)
-        rows=[saved._row(r) for r in store.db.execute(prefix+'SELECT * FROM visible'+where+
+        rows=[names.decorate(store,saved._row(r),installed=named) for r in store.db.execute(prefix+'SELECT * FROM visible'+where+
             ' ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?',(*params,PAGE_SIZE,(page-1)*PAGE_SIZE))]
         return dict(empty,rows=rows,page=page,pages=pages,total=total)
 

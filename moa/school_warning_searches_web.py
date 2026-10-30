@@ -29,7 +29,7 @@ def directory_link(*,q='',state='active',page=1):
 
 
 def directory(handler, raw):
-    from . import school_warning_search_management_web as management_web
+    from . import school_warning_search_management_web as management_web, school_warning_search_names_web as names_web
     values=query(raw,{'page','q','state'})
     data=saved.listing(handler.store,handler._principal(),q=values.get('q',[''])[0],state=values.get('state',['active'])[0],
         page=number(values.get('page',['1'])[0],1_000_000))
@@ -55,13 +55,15 @@ def directory(handler, raw):
             content+='<p data-warning-search-empty>표시 조건에 맞는 저장한 경고 검색 조건이 없습니다. 검색어·보관함을 확인하거나 통신문에서 새 조건을 저장하세요.</p>'
     for row in data['rows']:
         content+='<article class="card" data-warning-search-card><h2>'+esc(row['name'])+'</h2>'
+        if row['name']!=row['original_name']:content+='<p data-warning-original-name>처음 저장한 이름: '+esc(row['original_name'])+'</p>'
         content+='<p>문서: '+esc(row['title'])+' · 조건 저장: '+esc(row['created_at'])+'</p>'
         content+='<p data-warning-saved-state>'+('보관함' if row['state']=='archived' else '사용 중')+' · 상태 기록 #'+str(row['version'])+'</p>'
         content+='<p>검색어: '+esc(row['filters']['q'] or '전체')+' · 파일: '+esc(row['file_label'])+' · 유형: '+esc(row['code_label'])+'</p>'
         content+='<p class="compare-meta">저장 당시 변환 버전: <code>'+esc(row['conversion_revision'])+'</code></p>'
         content+='<a data-warning-search-open href="'+PATH+'/open?'+esc(urlencode({'id':row['id']}))+'">경고 검색 조건 불러오기</a>'
-        content+=' · <a data-warning-management-open href="'+esc(management_web.link(row['id'],**selected,list_page=data['page']))+'">보관·복원과 이력</a></article>'
-    content+='<p>파일·유형 이름은 저장 당시 표시입니다. 원래 경고·검수·영수증을 수정하거나 경고를 해결 처리하지 않습니다. 저장한 이름과 조건은 덮어쓰지 않으며 다른 조건은 새 이름으로 저장할 수 있습니다.</p>'
+        content+=' · <a data-warning-management-open href="'+esc(management_web.link(row['id'],**selected,list_page=data['page']))+'">보관·복원과 이력</a>'
+        content+=' · <a data-warning-name-open href="'+esc(names_web.link(row['id'],**selected,list_page=data['page']))+'">이름 변경과 이력</a></article>'
+    content+='<p>파일·유형 이름은 저장 당시 표시입니다. 원래 경고·검수·영수증을 수정하거나 경고를 해결 처리하지 않습니다. 처음 이름과 조건은 보존합니다. 표시 이름은 이름 변경과 이력에서 바꿀 수 있으며, 다른 조건은 새 항목으로 저장하세요.</p>'
     content+='<nav aria-label="저장한 경고 검색 조건 페이지">'+str(data['page'])+' / '+str(data['pages'])+'페이지 · 총 '+str(data['total'])+'개'
     for page,label in ((data['page']-1,'이전 저장 조건'),(data['page']+1,'다음 저장 조건')):
         if 1<=page<=data['pages']: content+=' · <a href="'+esc(directory_link(**selected,page=page))+'">'+label+'</a>'

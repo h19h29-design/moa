@@ -208,7 +208,7 @@ def test_source_receipt_rejects_foreign_owner_or_nonhistorical_input_even_with_i
 
 def test_v5_upgrade_is_explicit_backed_up_additive_and_repeatable(schools):
     m,s,p,_=schools; receipt,_=converted(m,s,p); source,head=setup_pair(s,p,receipt.version_id)
-    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DELETE FROM school_service_migrations WHERE version>=5;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_names; DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DELETE FROM school_service_migrations WHERE version>=5;')
     before=list(s.db.iterdump()); version=s.db.execute('PRAGMA user_version').fetchone()[0]; originals=files(s)
     assert not module().available(s)
     data=module().preview(s,p,source)
@@ -309,7 +309,7 @@ def test_http_permission_and_current_head_are_rechecked_after_preview(school_web
 
 def test_http_v4_keeps_read_only_preview_and_does_not_upgrade_on_get_or_post(school_web):
     s,base,a,p,source,head,doc,headers,values=http_setup(school_web)
-    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DELETE FROM school_service_migrations WHERE version>=5;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_names; DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE IF EXISTS school_warning_searches; DROP TABLE IF EXISTS school_receipt_searches; DROP TABLE IF EXISTS school_confirmed_export_downloads; DROP TABLE IF EXISTS school_confirmed_export_list_events; DROP TABLE school_confirmed_export_items; DROP TABLE school_confirmed_export_lists; DROP TABLE school_review_draft_handoffs; DROP TABLE school_review_draft_restores; DELETE FROM school_service_migrations WHERE version>=5;')
     before=list(s.db.iterdump()); readonly,_=page(a,base,route(source))
     assert not readonly.select_one('[data-draft-restore-form]') and readonly.select_one('[data-restore-reason]')
     assert fetch(a,base,'/structure-draft/restore',fields=values)[0]==409

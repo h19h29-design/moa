@@ -28,6 +28,7 @@ def render(handler,raw,*,status=200,warning=''):
     row=management.get(handler.store,p,values['id'][0],page=number(values.get('page',['1'])[0],1_000_000))
     content=STYLE+'<section class="comparison" id="warning-search-management"><h1>경고 검색 조건 보관·복원</h1><h2>'+esc(row['name'])+'</h2>'
     if warning: content+='<p role="alert" data-warning-management-conflict>'+esc(warning)+'</p>'
+    if row['name']!=row['original_name']:content+='<p data-warning-original-name>처음 저장한 이름: '+esc(row['original_name'])+'</p>'
     content+='<p data-warning-management-state>'+('보관함' if row['state']=='archived' else '사용 중')+' · 상태 기록 #'+str(row['version'])+'</p>'
     content+='<p>보관은 사용 중인 목록에서만 숨깁니다. 이름·조건·문서·변환 버전은 그대로 유지하며 보관함에서도 불러올 수 있습니다. 원본·검수 이력·영수증을 변경하지 않습니다.</p>'
     content+='<p>문서: '+esc(row['title'])+' · 처음 저장: '+esc(row['created_at'])+'</p>'

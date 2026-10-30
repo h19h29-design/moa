@@ -30,12 +30,12 @@ def args(pin,**filters): return dict(name='내 경고 조건',notice=pin['id'],r
 
 def old_rows(s):
     tables=[r[0] for r in s.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        if r[0] not in ('school_warning_searches','school_warning_search_events','school_service_migrations')]
+        if r[0] not in ('school_warning_searches','school_warning_search_events','school_warning_search_names','school_service_migrations')]
     return {n:[tuple(r) for r in s.db.execute('SELECT * FROM "'+n+'"')] for n in tables}
 
 
 def drop_v11(s):
-    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE school_warning_searches; DELETE FROM school_service_migrations WHERE version>=11;')
+    s.db.executescript('DROP TABLE IF EXISTS school_warning_search_names; DROP TABLE IF EXISTS school_warning_search_events; DROP TABLE school_warning_searches; DELETE FROM school_service_migrations WHERE version>=11;')
 
 
 def test_v10_upgrade_is_additive_backed_up_repeatable_and_preserves_existing_history(schools):
@@ -50,7 +50,7 @@ def test_v10_upgrade_is_additive_backed_up_repeatable_and_preserves_existing_his
         assert db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]==10
     assert old_rows(s)==old and originals(s)==files and saved.available(s)
     assert s.db.execute('PRAGMA user_version').fetchone()[0]==version
-    assert s.db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]==12
+    assert s.db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]==13
     after=list(s.db.iterdump()); assert svc.migrate(s) is None and list(s.db.iterdump())==after
     assert s.db.execute('PRAGMA quick_check').fetchone()[0]=='ok'
     assert not s.db.execute('PRAGMA foreign_key_check').fetchall()

@@ -20,7 +20,7 @@ def test_explicit_cli_migration_configuration_and_fixture_receiving(tmp_path, ca
     migration_output = capsys.readouterr().out
     with Store(root) as s:
         version = s.db.execute('SELECT max(version) FROM school_service_migrations').fetchone()[0]
-    assert version == 12 and migration_output.startswith('school_schema=12; backup=')
+    assert version == 13 and migration_output.startswith('school_schema=13; backup=')
     assert 'already_applied' not in migration_output
     assert cli.main(['--data',str(root),'configure','--config',str(config)]) == 0
     fixture = tmp_path/'source-fixture.json'
@@ -42,7 +42,7 @@ def test_cli_repeat_migration_reports_installed_version_without_new_backup(tmp_p
         before = list(s.db.iterdump())
     backups = sorted((root/'db'/'backups').glob('*.sqlite3'))
     assert main(['--data',str(root),'migrate']) == 0
-    assert capsys.readouterr().out == 'school_schema=12; backup=already_applied\n'
+    assert capsys.readouterr().out == 'school_schema=13; backup=already_applied\n'
     assert sorted((root/'db'/'backups').glob('*.sqlite3')) == backups
     with Store(root) as s:
         assert list(s.db.iterdump()) == before
@@ -54,7 +54,7 @@ def test_cli_unknown_schema_does_not_report_migration_success(tmp_path, capsys):
     assert main(['--data',str(root),'migrate']) == 0
     capsys.readouterr()
     with Store(root) as s:
-        s.db.execute("INSERT INTO school_service_migrations VALUES(13,'synthetic-future')")
+        s.db.execute("INSERT INTO school_service_migrations VALUES(14,'synthetic-future')")
         s.db.commit()
         before = list(s.db.iterdump())
     with pytest.raises(RuntimeError, match='Unknown school schema'):

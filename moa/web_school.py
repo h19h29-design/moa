@@ -212,6 +212,9 @@ class SchoolHandler(Handler):
             if path in ('/structure-warning-searches','/structure-warning-searches/open'):
                 from . import school_warning_searches_web
                 return school_warning_searches_web.dispatch(self,path,raw=urlsplit(self.path).query)
+            if path == '/structure-warning-searches/name':
+                from . import school_warning_search_names_web
+                return school_warning_search_names_web.dispatch(self,raw=urlsplit(self.path).query)
             if path == '/structure-warning-searches/manage':
                 from . import school_warning_search_management_web
                 return school_warning_search_management_web.dispatch(self,path,raw=urlsplit(self.path).query)
@@ -252,7 +255,7 @@ class SchoolHandler(Handler):
             if path == '/structure-confirm': maximum = 32768
             if path == '/confirmed-export/receipt-searches/save': maximum = 8192
             if path == '/structure-warning-searches/save': maximum = 8192
-            if path in ('/structure-warning-searches/archive','/structure-warning-searches/restore'): maximum = 4096
+            if path in ('/structure-warning-searches/rename','/structure-warning-searches/archive','/structure-warning-searches/restore'): maximum = 4096
             if path in ('/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore'): maximum = 16384
             if not 0 < length <= maximum: return self._send('Request too large', 413)
             if path != '/login' and not self._session(): return self._login_page('로그인이 필요합니다.', 401)
@@ -261,11 +264,15 @@ class SchoolHandler(Handler):
             if path == '/upload':
                 form, uploads, attachment_indices = parse_upload(data, self.headers.get('Content-Type', ''), max_field_bytes=200_000)
             else:
-                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-warning-searches/archive','/structure-warning-searches/restore','/structure-warning-searches/save','/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit','/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore','/confirmed-export/receipt-searches/save'), max_num_fields=80, errors='strict')
+                form = parse_qs(data.decode('utf-8'), keep_blank_values=path in ('/structure-warning-searches/rename','/structure-warning-searches/archive','/structure-warning-searches/restore','/structure-warning-searches/save','/structure-review','/review-queue/save','/review-saved/move','/structure-draft/save','/structure-draft/autosave','/structure-draft/restore','/structure-draft/submit','/confirmed-export/prepare','/confirmed-export/download','/confirmed-export/save','/confirmed-export/saved/download','/confirmed-export/saved/prepare-current','/confirmed-export/saved/archive','/confirmed-export/saved/restore','/confirmed-export/receipt-searches/save'), max_num_fields=80, errors='strict')
             if path == '/login': return self._login(form)
             if not self._csrf(form): return self._send('요청 인증을 확인하세요.', 403)
             principal = self._principal()
             if path == '/logout': return self._logout()
+            if path == '/structure-warning-searches/rename':
+                if urlsplit(self.path).query: raise ValueError('Unexpected warning name query')
+                from . import school_warning_search_names_web
+                return school_warning_search_names_web.dispatch(self,form=form)
             if path in ('/structure-warning-searches/archive','/structure-warning-searches/restore'):
                 if urlsplit(self.path).query: raise ValueError('Unexpected warning management query')
                 from . import school_warning_search_management_web
