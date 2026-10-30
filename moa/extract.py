@@ -8,13 +8,13 @@ import sys
 import zipfile
 from pathlib import Path
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Comment
 from defusedxml import ElementTree
 
 from .core import digest, encode
 
 LAYOUTS = ('key_value_cards','timeline','grade_cards','comparison','read_only_form','scroll_table')
-PARSER_VERSION = 'moa-local-v4'
+PARSER_VERSION = 'moa-local-v8-native-controls'
 
 
 def detect_kind(data: bytes, filename: str = '') -> str:
@@ -49,6 +49,10 @@ def _span(value) -> int:
 
 def html_document(html: str) -> dict:
     soup=BeautifulSoup(html,'html.parser')
+    # Editor state in comments is not visible notice content. Do not remove a
+    # visible paragraph merely because it contains an editor-like string.
+    for comment in soup.find_all(string=lambda node: isinstance(node, Comment)):
+        comment.extract()
     for bad in soup.select('script,style,nav'):
         bad.decompose()
     # A form can contain submission instructions. Keep its visible text while
@@ -106,8 +110,78 @@ def html_document(html: str) -> dict:
 
 def hwpx_document(data: bytes) -> dict:
     def name(el): return el.tag.split('}')[-1]
-    def child(el,key): return next((e for e in el.iter() if name(e)==key),None)
-    texts,tables=[],[]
+    def child(el,key): return next((e for e in el if name(e)==key),None)
+    texts,tables,blocks=[],[],[]
+
+    def flow(nodes, depth=0):
+        if depth > 32:
+            raise ValueError('HWPX 중첩 깊이 제한 초과')
+        out, pending = [], []
+        def flush():
+            text = ''.join(pending).strip()
+            pending.clear()
+            if text:
+                out.append({'type':'paragraph','text':text})
+        def visit(el):
+            tag = name(el)
+            if tag == 'tbl':
+                flush()
+                out.append({'type':'table','table_index':parse_table(el, depth + 1)})
+            elif tag == 'p':
+                flush()
+                out.extend(flow(el, depth + 1))
+            elif tag == 't':
+                # Runs are formatting boundaries, not word/paragraph boundaries.
+                pending.append(''.join(el.itertext()))
+            elif tag in ('lineBreak','br'):
+                pending.append('\n')
+            elif tag == 'tab':
+                pending.append('\t')
+            else:
+                for item in el:
+                    visit(item)
+        for node in nodes:
+            visit(node)
+        flush()
+        return out
+
+    def parse_table(tbl, depth):
+        if len(tables) >= 100:
+            raise ValueError('HWPX 표 개수 제한 초과')
+        index = len(tables)
+        tables.append({})  # Reserve parent index before reading nested tables.
+        cells=[]
+        for r,tr in enumerate(e for e in tbl if name(e)=='tr'):
+            for c,tc in enumerate(e for e in tr if name(e)=='tc'):
+                addr,span=child(tc,'cellAddr'),child(tc,'cellSpan')
+                row=int(addr.get('rowAddr',r)) if addr is not None else r
+                col=int(addr.get('colAddr',c)) if addr is not None else c
+                rs=_span(span.get('rowSpan',1)) if span is not None else 1
+                cs=_span(span.get('colSpan',1)) if span is not None else 1
+                if not 0<=row<1000 or not 0<=col<200 or row+rs>1000 or col+cs>200:
+                    raise ValueError('비정상 표 좌표')
+                content = flow(tc, depth)
+                cells.append({'row':row,'col':col,'rowspan':rs,'colspan':cs,
+                    'text':'\n'.join(b['text'] for b in content if b['type']=='paragraph'),
+                    'header':False,'blocks':content})
+                if len(cells)>10000:
+                    raise ValueError('HWPX 표 크기 제한 초과')
+        if sum(c['rowspan']*c['colspan'] for c in cells)>200000:
+            raise ValueError('HWPX 표 병합 크기 제한 초과')
+        occupied=set()
+        overlap=False
+        for cell in cells:
+            for row in range(cell['row'],cell['row']+cell['rowspan']):
+                for col in range(cell['col'],cell['col']+cell['colspan']):
+                    overlap |= (row,col) in occupied
+                    occupied.add((row,col))
+        rows=max((c['row']+c['rowspan'] for c in cells),default=0)
+        cols=max((c['col']+c['colspan'] for c in cells),default=0)
+        tables[index]={'rows':rows,'cols':cols,'cells':cells,'source':'hwpx',
+            'header_inferred':True,'section':section,
+            'nested':any(b['type']=='table' for c in cells for b in c['blocks']),
+            'geometry_uncertain':overlap or len(occupied)!=rows*cols}
+        return index
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         info=z.infolist()
         if len(info)>1000 or sum(i.file_size for i in info)>50*1024*1024:
@@ -120,25 +194,8 @@ def hwpx_document(data: bytes) -> dict:
         for section in names:
             root=ElementTree.fromstring(z.read(section))
             texts.extend(e.text or '' for e in root.iter() if name(e)=='t')
-            for tbl in (e for e in root.iter() if name(e)=='tbl'):
-                cells=[]
-                trs=[e for e in tbl if name(e)=='tr']
-                for r,tr in enumerate(trs):
-                    for c,tc in enumerate(e for e in tr if name(e)=='tc'):
-                        addr,span=child(tc,'cellAddr'),child(tc,'cellSpan')
-                        row=int(addr.get('rowAddr',r)) if addr is not None else r
-                        col=int(addr.get('colAddr',c)) if addr is not None else c
-                        rs=_span(span.get('rowSpan',1)) if span is not None else 1
-                        cs=_span(span.get('colSpan',1)) if span is not None else 1
-                        if not 0<=row<1000 or not 0<=col<200: raise ValueError('비정상 표 좌표')
-                        cells.append({'row':row,'col':col,'rowspan':rs,'colspan':cs,
-                            'text':' '.join((e.text or '') for e in tc.iter() if name(e)=='t'), 'header':False})
-                if len(cells)>10000 or len(tables)>=100: raise ValueError('표 크기/개수 제한 초과')
-                tables.append({'rows':max((c['row']+c['rowspan'] for c in cells),default=0),
-                    'cols':max((c['col']+c['colspan'] for c in cells),default=0), 'cells':cells,
-                    'source':'hwpx','section':section, 'header_inferred':True,
-                    'nested':sum(1 for e in tbl.iter() if name(e)=='tbl')>1})
-    return {'status':'extracted','text':'\n'.join(texts),'tables':tables}
+            blocks.extend(flow(root))
+    return {'status':'extracted','text':'\n'.join(texts),'tables':tables,'blocks':blocks}
 
 
 def pdf_document(data: bytes) -> dict:
@@ -150,6 +207,8 @@ def pdf_document(data: bytes) -> dict:
             text=page.extract_text() or ''
             texts.append(text)
             if len(text.strip())<20: warnings.append(f'page_{number}:needs_vision')
+            if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffd]',text):
+                warnings.append(f'page_{number}:unmapped_text_control')
             page_tables=page.find_tables()
             if len(page_tables)>50: raise ValueError('페이지당 표 개수 제한 초과')
             for table in page_tables:
@@ -158,12 +217,16 @@ def pdf_document(data: bytes) -> dict:
                 for r,row in enumerate(grid):
                     for c,value in enumerate(row):
                         if value is not None:
+                            if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ufffd]',value):
+                                warnings.append(f'page_{number}:unmapped_text_control')
                             cells.append({'row':r,'col':c,'rowspan':1,'colspan':1,
                                           'text':value,'header':False})
                 tables.append({'rows':len(grid),'cols':max(map(len,grid),default=0),'cells':cells,
                     'source':'pdf','page':number,'bbox':list(table.bbox),'raw_grid':grid,
                     'geometry_uncertain':True})  # PDF merged/header geometry is not a gold label.
-    return {'status':'needs_vision' if warnings else 'extracted', 'text':'\n\n'.join(texts),
+    status = 'needs_vision' if any('needs_vision' in w for w in warnings) else \
+             'needs_parser' if warnings else 'extracted'
+    return {'status':status, 'text':'\n\n'.join(texts),
             'tables':tables,'warnings':warnings}
 
 
@@ -187,28 +250,34 @@ def _hwp_records(data: bytes):
 
 
 def _hwp_text(raw: bytes) -> str:
-    units = raw.decode('utf-16-le', 'replace')
+    # Lengths in the HWP contract count UTF-16 code units, not Python Unicode
+    # characters. Decoding first would collapse surrogate pairs in metadata.
+    import struct
+    size = len(raw) // 2
+    units = struct.unpack('<' + 'H' * size, raw[:size * 2])
     out, i = [], 0
     while i < len(units):
-        c = ord(units[i])
+        c = units[i]
         if c == 0x0d:
             out.append('\n')
             i += 1
-        elif c in (0x09, 0x0a):
+        elif c in (0x09, 0x0a, 0x1e, 0x1f):
             out.append(' ')
-            i += 1
+            i += 8 if c == 0x09 and i + 7 < len(units) and units[i + 7] == c else 1
         elif c == 0:
             i += 1
         elif c < 0x20:
-            # Extended inline controls (objects, fields, hidden chars) occupy 8
-            # utf-16 units only when followed by a printable control code pair;
-            # lone control bytes and padding consume a single unit.
-            nxt = ord(units[i + 1]) if i + 1 < len(units) else 0
-            i += 8 if nxt >= 0x20 else 1
+            # Eight-unit controls have a closing marker. A printable character
+            # after a lone marker is notice text, not metadata to skip.
+            paired = c in (1,2,3,4,5,6,7,8,11,12,14,15,16,17,18,19,20,21,22,23) and \
+                i + 7 < len(units) and units[i + 7] == c
+            i += 8 if paired else 1
         else:
-            out.append(units[i])
+            out.append(chr(c))
             i += 1
-    return ''.join(out).strip()
+    if len(raw) % 2:
+        out.append('\ufffd')
+    return ''.join(out).encode('utf-16-le', 'surrogatepass').decode('utf-16-le', 'replace').strip()
 
 
 def _hwp_content(section: bytes) -> tuple[list, list]:

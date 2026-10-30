@@ -16,12 +16,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
 from .core import Store, encode, kst_now
+from . import worker_api
 from .extract import LAYOUTS
 from .learn import build_review_queue, effective_table, review
 from .render import render_mobile, render_page
 from .web_auth import AuthMixin
 from .web_mobile import MobileMixin
 from .web_corpus import CorpusMixin
+from .web_worker import WorkerMixin
 from . import mobile, corpus
 
 DB_LOCK = threading.RLock()
@@ -54,9 +56,10 @@ PAGE = ('<!doctype html><html lang="ko"><head><meta charset="utf-8">'
         '.hist{font-size:12px;color:#567}</style></head><body>')
 
 
-class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
+class Handler(AuthMixin, MobileMixin, CorpusMixin, WorkerMixin, BaseHTTPRequestHandler):
     store: Store = None
     token: str = ''
+    worker_token: str = ''
 
     def log_message(self, *a):
         pass
@@ -75,7 +78,7 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
         return self._send_bytes(path.read_bytes(), filename)
 
     def _security_headers(self):
-        self.send_header('Cache-Control','private, no-store')
+        self.send_header('Cache-Control','private, no-store, no-transform')
         self.send_header('X-Frame-Options','SAMEORIGIN')
         self.send_header('Referrer-Policy','same-origin')
         self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'unsafe-inline' 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'")
@@ -112,6 +115,8 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
                 return self._login_page()
             if path == '/static/mobile.js':
                 return self._send(Path(__file__).with_name('mobile_ui.js').read_text(),ctype='text/javascript; charset=utf-8')
+            if path.startswith('/v1/worker/'):
+                return self._worker_get(path, q)
             if not self._session():
                 return self._login_page('자료를 열려면 로그인하세요.',401)
             if path == '/':
@@ -126,7 +131,10 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
                 return self._mobile_preview(q.get('id',[''])[0],q.get('revision',[''])[0])
             if path == '/mobile/state':
                 row = mobile.notice_row(self.store,q.get('id',[''])[0])
-                return self._send(encode({'state':row['state'],'revision':row['latest_revision']}),ctype='application/json')
+                machine = worker_api.machine_state(self.store, q.get('id',[''])[0])
+                return self._send(encode({'state':row['state'],'revision':row['latest_revision'],
+                                          'machine_check': machine,
+                                          'human_approved_revision': row.get('approved_revision')}),ctype='application/json')
             if path in ('/mobile/file','/mobile/original'):
                 return self._mobile_file(q.get('id',[''])[0],q.get('file',[''])[0],path=='/mobile/original')
             if path in ('/mobile/html','/mobile/bundle'):
@@ -138,6 +146,8 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
             if path.startswith('/obj/'):
                 return self._object(path.rsplit('/', 1)[-1])
             self._send('<p>404</p>', 404)
+        except mobile.SchoolAccessDenied:
+            self._send('<p>404</p>',404)
         except ValueError as exc:
             self._send(self._page('<div class="card">'+esc(exc)+'</div>'),400)
         except Exception:
@@ -272,6 +282,7 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
     def _object(self, sha: str):
         if not re.fullmatch(r'[a-f0-9]{64}', sha):
             return self._send('<p>잘못된 객체</p>', 400)
+        if mobile.school_object(self.store, sha): return self._send('<p>404</p>',404)
         path = self.store.object_path(sha)
         if not path.exists():
             return self._send('<p>없음</p>', 404)
@@ -290,6 +301,14 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
         limit = mobile.MAX_UPLOAD_BYTES+64*1024 if path in ('/upload','/mobile/add') else 4*1024*1024
         if length <= 0 or length > limit or self.headers.get('Transfer-Encoding'):
             return self._send('<p>요청 용량/형식 제한</p>',413)
+        if path.startswith('/v1/worker/'):
+            if length > 1024*1024:
+                return self._send_json({'ok': False, 'errors': ['worker body too large']}, 413)
+            self.connection.settimeout(30)
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                return self._send_json({'ok': False, 'errors': ['incomplete body']}, 400)
+            return self._worker_post(path, raw)
         if path != '/login' and not self._session():
             return self._send('<p>로그인이 필요합니다.</p>',403)
         self.connection.settimeout(30)
@@ -309,7 +328,9 @@ class Handler(AuthMixin, MobileMixin, CorpusMixin, BaseHTTPRequestHandler):
             if path.startswith('/mobile/'):
                 return self._mobile_post(path,form)
             if path != '/review': return self._send('<p>404</p>',404)
-        except (ValueError,KeyError) as exc:
+        except mobile.SchoolAccessDenied:
+            return self._send('<p>404</p>',404)
+        except (ValueError, KeyError) as exc:
             return self._send(self._page('<p>'+esc(exc)+'</p>'),400)
         except Exception:
             return self._send(self._page('<p>처리하지 못했습니다. 입력 파일·내용을 확인하세요.</p>'),500)
@@ -345,6 +366,7 @@ def serve(root, host='127.0.0.1', port=8321):
     corpus.enqueue_missing(store)
     Handler.store = store
     Handler.token = os.environ.get('MOA_REVIEW_TOKEN', '')
+    Handler.worker_token = os.environ.get('MOA_WORKER_TOKEN', '')
     server = ThreadingHTTPServer((host, port), Handler)
     stopped = threading.Event()
     def worker():
@@ -364,7 +386,8 @@ def serve(root, host='127.0.0.1', port=8321):
     worker_thread = threading.Thread(target=worker,daemon=True,name='moa-mobile-worker')
     worker_thread.start()
     print(encode({'event': 'review_ui', 'listen': f'{host}:{port}',
-                  'token_required': bool(Handler.token)}), flush=True)
+                  'token_required': bool(Handler.token),
+                  'worker_enabled': bool(Handler.worker_token)}), flush=True)
     try:
         server.serve_forever()
     finally:

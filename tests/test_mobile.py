@@ -113,6 +113,19 @@ def test_repeated_headers_normalise_all_17_pairs_and_refuse_same_shape_only():
     assert mobile.repeated_columns(missing)[1]==''
 
 
+def test_repeated_columns_preserves_both_original_caption_and_preheader_condition():
+    table = repeated_table()
+    table['caption'] = '선택 학과 안내'
+    for cell in table['cells']:
+        cell['row'] += 1
+    table['cells'].insert(0, {'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 6,
+                              'text': '전 학생은 반드시 2개 학과 선택', 'header': False})
+    table['rows'] += 1
+    normal, rule = mobile.repeated_columns(table)
+    assert rule == 'repeated-columns-v1'
+    assert normal['caption'] == '선택 학과 안내\n전 학생은 반드시 2개 학과 선택'
+
+
 def test_mixed_notice_preserves_submission_conditions_and_keeps_form_original(tmp_path):
     content = '<html><p>10월 30일까지 3층 과학정보부에 제출. 이후 GED에서 직접 지원.</p><p>희망 신청서</p><p>신청자 ( ) 보호자 ( )</p></html>'.encode()
     with Store(tmp_path) as store:
@@ -315,7 +328,7 @@ def test_browser_session_upload_csrf_and_named_attachment_download(web):
     response=browser.open(base+'/mobile/file?id='+ident+'&file=1')
     assert response.read()==b'original form'
     assert 'filename*=UTF-8' in response.headers['Content-Disposition']
-    assert response.headers['Cache-Control']=='private, no-store'
+    assert response.headers['Cache-Control']=='private, no-store, no-transform'
     with pytest.raises(urllib.error.HTTPError) as denied:
         browser.open(base+'/mobile/generate',urllib.parse.urlencode({'id':ident,'revision':''}).encode())
     assert denied.value.code==403

@@ -22,7 +22,35 @@ STYLE = ('label{display:block;margin:12px 0}label input:not([type=checkbox]),lab
          '.cell-editor{display:grid;grid-template-columns:1fr auto;gap:8px;margin:10px 0}.cell-editor .coords{max-width:160px;font-size:12px}'
          '.coords input[type=number]{width:45px}.cell-editor label{margin:4px 0}.login{max-width:400px;margin:12vh auto}'
          'h1,h2,h3,p,a{overflow-wrap:anywhere}input[type=file]{width:100%}.cols>*{min-width:0}'
+         '.evidence-comparison{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}'
+         '.evidence-comparison pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:440px;overflow:auto}'
+         'mark.evidence-diff{background:#fff09b;color:#432d00}.review-jumps{display:flex;gap:16px;flex-wrap:wrap}'
+         '@media(max-width:700px){.evidence-comparison{grid-template-columns:1fr}}'
          '@media(max-width:700px){.file-options{grid-template-columns:1fr}.preview{height:650px}.cell-editor{grid-template-columns:1fr}.cell-editor .coords{max-width:100%}}')
+
+
+def parse_upload(data, ctype, *, max_field_bytes=2000):
+    """Shared bounded multipart decoding. Authorization stays with each caller."""
+    if not ctype.startswith('multipart/form-data') or len(ctype) > 500 or '\r' in ctype or '\n' in ctype:
+        raise ValueError('파일 업로드 형식이 올바르지 않습니다.')
+    if len(data) > mobile.MAX_UPLOAD_BYTES + 1_000_000: raise ValueError('업로드 크기 제한')
+    message = BytesParser(policy=policy.default).parsebytes(
+        ('Content-Type: '+ctype+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+data)
+    if not message.is_multipart(): raise ValueError('업로드 파일을 확인하세요.')
+    fields, uploads, attach = {}, [], []
+    for count, part in enumerate(message.iter_parts()):
+        if count >= 60 or part.is_multipart(): raise ValueError('업로드 항목 제한')
+        name = part.get_param('name',header='content-disposition')
+        filename = part.get_filename()
+        raw = part.get_payload(decode=True) or b''
+        if filename:
+            if name not in ('guide','attachments'): raise ValueError('알 수 없는 파일 항목')
+            if name == 'attachments': attach.append(len(uploads))
+            uploads.append((filename, raw))
+        elif name:
+            if len(raw) > max_field_bytes or name in fields: raise ValueError('입력값 길이·중복 제한')
+            fields[name] = [raw.decode('utf-8','strict')]
+    return fields, uploads, attach
 
 
 class MobileMixin:
@@ -44,9 +72,20 @@ class MobileMixin:
             '<label><input name="evaluation" type="checkbox"> 평가용 자료 (다른 안내문의 추천 사례에서 제외)</label>'
             '<button class="ok">업로드하고 파일 역할 확인</button>'
             '<p class="muted">파일당 25MB · 총 50MB · 최대 10개. HWP/HWPX/DOCX/텍스트 PDF/HTML 변환, 이미지·스캔 문서는 미지원 표시.</p>'
-            '</form></section><h2>업로드·변환 기록</h2>')
-        rows = self.store.db.execute('SELECT * FROM mobile_notices WHERE origin_notice_id IS NULL OR latest_revision IS NOT NULL'
-                                    ' ORDER BY updated_at DESC LIMIT 60').fetchall()
+            '</form></section>')
+        from .pilot import review_suggestions
+        suggestions = review_suggestions(self.store)
+        if suggestions:
+            content += '<section class="card"><h2>오늘 확인할 자료 · 하루 최대 3건</h2><p class="muted">중요 예외 최대 2건과 전체 점검 표본 1건입니다. 보류는 오답이 아니며 자동 승인하지 않습니다.</p>'
+            for item in suggestions:
+                if mobile.school_owned(self.store, item['mobile_id']): continue
+                entry = mobile.notice_row(self.store, item['mobile_id'])
+                label = '중요 예외' if item['reason'] == 'important_exception' else '전체 점검 표본'
+                content += '<p><a href="/notice?id=%s">%s</a> · %s</p>' % (esc(item['mobile_id']), esc(entry['title']), label)
+            content += '</section>'
+        content += '<h2>업로드·변환 기록 (전체 기록 · 매일 모두 검수할 필요 없음)</h2>'
+        rows = self.store.db.execute('SELECT n.* FROM mobile_notices n WHERE (origin_notice_id IS NULL OR latest_revision IS NOT NULL) AND '
+                                    +mobile.research_filter(self.store)+' ORDER BY updated_at DESC LIMIT 60').fetchall()
         states = {'files_ready':'파일 역할 확인','processing':'변환 중','candidate':'미검수','approved':'승인','held':'보류','rejected':'반려'}
         for row in rows:
             content += '<section class="card"><a href="/notice?id=%s">%s</a> <span class="pill">%s</span> <span class="muted">%s</span></section>' % (
@@ -55,24 +94,7 @@ class MobileMixin:
         self._send(self._page(content+'</main>'))
 
     def _upload(self, data):
-        ctype = self.headers.get('Content-Type','')
-        if not ctype.startswith('multipart/form-data') or len(ctype) > 500:
-            raise ValueError('파일 업로드 형식이 올바르지 않습니다.')
-        message = BytesParser(policy=policy.default).parsebytes(
-            ('Content-Type: '+ctype+'\r\nMIME-Version: 1.0\r\n\r\n').encode()+data)
-        if not message.is_multipart(): raise ValueError('업로드 파일을 확인하세요.')
-        fields, uploads, attach = {}, [], []
-        for part in message.iter_parts():
-            name = part.get_param('name',header='content-disposition')
-            filename = part.get_filename()
-            raw = part.get_payload(decode=True) or b''
-            if filename:
-                if name not in ('guide','attachments'): raise ValueError('알 수 없는 파일 항목')
-                if name == 'attachments': attach.append(len(uploads))
-                uploads.append((filename,raw))
-            elif name:
-                if len(raw) > 2000: raise ValueError('입력값 길이 제한')
-                fields[name] = [raw.decode('utf-8','strict')]
+        fields, uploads, attach = parse_upload(data, self.headers.get('Content-Type',''))
         if not self._csrf(fields): return self._send('<p>요청 인증을 확인하세요.</p>',403)
         if urlsplit(self.path).path == '/mobile/add':
             ident = fields.get('id',[''])[0]
@@ -98,6 +120,27 @@ class MobileMixin:
             curation=get_record(self.store,row['origin_notice_id'])
             content+='<p class="card">자료 활용 분류: %s · <a href="/corpus/detail?id=%s">파일별 분류 확인·수정</a></p>' % (esc(USES[curation['use']] if curation else '미분류'),esc(row['origin_notice_id']))
         if old: content += '<p class="warning">과거 버전입니다. <a href="/notice?id=%s">최신 버전 열기</a></p>' % esc(ident)
+        hold_suggestion, hold_explanation = 'unconfirmed', ''
+        if rev:
+            # Read-only sidecar, after route authentication, bound to this exact
+            # source-file role inventory and rendered revision. No DB changes.
+            from . import review_evidence
+            evidence = review_evidence.load(self.store, ident, rev, files)
+            hold_suggestion, hold_explanation = review_evidence.suggest_hold(evidence)
+            content += '<p class="review-jumps"><a href="#notice-comparison">원본·모바일 비교로 이동</a><a href="#notice-review">승인·보류로 이동</a></p>'
+            content += review_evidence.render(evidence)
+            from .worker_api import evidence_state
+            checks = [e for e in evidence_state(self.store, ident) if e['render_revision'] == rev['id']]
+            if checks:
+                parent = next((e for e in checks if e['job_id'].startswith('parent-')), None)
+                content += '<section class="card"><h2>자동 검증 · 시험 운영</h2><p>자동 공개 꺼짐 · 최종 상태: 사람 검수 필요</p>'
+                if parent:
+                    report = parent['rule_report'] or {}
+                    count = sum(len(v.get('findings', [])) for v in report.get('viewports', []))
+                    content += '<p>원문/실제 HTML 규칙 검사: %s · 중요 확인 항목 %s개 (화면 크기별 합계)</p>' % (esc(report.get('status', '미실행')), count)
+                model = [e for e in checks if not e['job_id'].startswith('parent-')]
+                content += '<p>맥북 검증 결과 수신: %s / %s개 구역. 규칙과 모델 원판정은 별도로 저장합니다.</p>' % (sum(bool(e['model_report']) for e in model), len(model))
+                content += '<details><summary>모델 원판정·규칙·최종 판정 확인</summary><pre>'+esc(json.dumps(checks, ensure_ascii=False, indent=2))+'</pre></details></section>'
         if processing:
             content += '<p class="card" id="conversion-state" data-id="%s">모바일 HTML을 생성하고 있습니다. 완료되면 화면이 갱신됩니다.</p><script src="/static/mobile.js" defer></script>' % esc(ident)
         failed = self.store.db.execute("SELECT 1 FROM jobs WHERE kind='mobile' AND ref_id=? AND status='error'",(ident,)).fetchone()
@@ -138,7 +181,7 @@ class MobileMixin:
                 originals += '<details><summary>%s · PDF 원본 보기</summary><iframe src="/mobile/original?id=%s&file=%s"></iframe></details>' % (esc(file['filename']),esc(ident),esc(file['id']))
         for source in data.get('sources',[]):
             originals += '<details open><summary>원문 추출 텍스트 · 파일 %s</summary><pre>%s</pre></details>' % (esc(source['file_id']),esc(source.get('text','')))
-        content += ('<h2>2. 원문과 모바일 결과 비교</h2><div class="cols"><section class="card"><h3>원본</h3><p class="muted">HWP·DOCX 원본은 위 다운로드에서 열어 대조하세요.</p>%s</section>'
+        content += ('<h2 id="notice-comparison">2. 원문과 모바일 결과 비교</h2><div class="cols"><section class="card"><h3>원본</h3><p class="muted">HWP·DOCX 원본은 위 다운로드에서 열어 대조하세요. 아래는 추출 텍스트이며 원본 페이지 이미지가 아닙니다.</p>%s</section>'
                     '<section class="card"><h3>모바일 결과</h3><iframe title="모바일 안내 미리보기" class="preview" src="/mobile/preview?id=%s&revision=%s"></iframe></section></div>') % (originals,esc(ident),esc(rev['id']))
         content += '<section class="card"><h2>변환에 사용한 규칙·승인 사례</h2>'
         for audit in data.get('recommendations',[]):
@@ -157,21 +200,24 @@ class MobileMixin:
                 '<details><summary>구조 JSON 직접 수정 (고급)</summary><textarea id="blocks" name="blocks">%s</textarea></details>'
                 '<button class="ok">수정 저장 후 재검토</button></form></details><script src="/static/mobile.js" defer></script>') % (
                     esc(ident),esc(rev['id']),esc(data['title']),esc(json.dumps(data['blocks'],ensure_ascii=False,indent=1)))
-            reasons = ''.join('<option value="%s">%s</option>' % (key,esc(label)) for key,label in mobile.REASONS.items())
-            content += ('<section class="card"><h2>4. 이 버전 검수</h2><form action="/mobile/review" method="post">'+self._csrf_field()+
+            reasons = ''.join('<option value="%s"%s>%s</option>' % (key,' selected' if key==hold_suggestion else '',esc(label)) for key,label in mobile.REASONS.items())
+            suggestion = ('보류 사유 자동 제안: '+mobile.REASONS[hold_suggestion]+' · '+hold_explanation+
+                          ' (아래 사유·메모에서 변경 가능, 아직 저장되지 않음)') if hold_explanation else '보류 기본값: 아직 미확인 · 필요하면 사유·메모에서 변경하세요.'
+            content += ('<section class="card" id="notice-review"><h2>4. 이 버전 검수</h2><form action="/mobile/review" method="post">'+self._csrf_field()+
                 '<input name="id" type="hidden" value="%s"><input name="revision" type="hidden" value="%s">'
                 '<input name="review_mode" type="hidden" value="quick">'
                 '<p>내용이 맞으면 승인, 문제가 있거나 아직 확인하지 못했으면 보류하세요.</p>'
                 '<p class="muted">승인은 원문·표 관계·파일 역할·이용 권한·개인정보 확인 완료를 뜻합니다. 검수 번호와 시각은 자동 기록됩니다.</p>'
                 '<div class="quick-actions"><button name="action" value="approved" class="ok">승인</button>'
                 '<button name="action" value="held" class="hold">보류</button></div>'
+                '<p class="muted">%s</p>'
                 '<details><summary>사유·메모 / 반려·승인취소 (선택)</summary>'
                 '<label>보류·반려 사유 <select name="reason">%s</select></label>'
                 '<label>메모 <textarea name="note" maxlength="2000" style="min-height:70px"></textarea></label>'
                 '<div class="actions"><button name="action" value="rejected" class="bad">반려</button>'
                 '<button name="action" value="candidate">승인취소 / 재검토</button></div></details></form>'
                 '<p class="muted">보류는 오답 확정이 아닙니다. 파일·내용 변경 시 새 버전을 다시 검수합니다.</p></section>') % (
-                    esc(ident),esc(rev['id']),reasons)
+                    esc(ident),esc(rev['id']),esc(suggestion),reasons)
         content += '<section class="card"><h2>HTML·첨부 이용</h2><p><a href="/mobile/html?id=%s">HTML 다운로드</a> · <a href="/mobile/bundle?id=%s">HTML + 실제 원본 파일 ZIP 다운로드</a></p><p class="muted">미검수 결과에는 미검수 표시가 유지됩니다. ZIP을 풀고 index.html을 열면 첨부도 함께 열립니다.</p></section>' % (esc(ident),esc(ident))
         content += '<section class="card"><h2>변경 이력</h2>'
         for history in self.store.db.execute('SELECT sequence,id,created_at FROM mobile_revisions WHERE notice_id=? ORDER BY sequence DESC',(ident,)):
