@@ -21,14 +21,18 @@ def render(handler,raw,*,status=200,warning=''):
     if 'id' not in values:raise ValueError('Saved warning condition required')
     back=context(values);p=handler._principal()
     row=names.get(handler.store,p,values['id'][0],page=number(values.get('page',['1'])[0],1_000_000))
+    writable=not (row['name_required'] or row['management_required']) and svc.require_member(handler.store,p)['role'] in svc.WRITE_ROLES
+    from .school_warning_name_restore_web import link as restore_link
     content=STYLE+'<section class="comparison" id="warning-search-name"><h1>경고 검색 조건 이름 관리</h1>'
     if warning:content+='<p role="alert" data-warning-name-conflict>'+esc(warning)+'</p>'
     content+='<h2 data-warning-current-name>'+esc(row['name'])+'</h2><p data-warning-original-name>처음 저장한 이름: '+esc(row['original_name'])+'</p>'
+    if writable and row['name']!=row['original_name']:
+        content+='<p><a data-warning-name-original-restore href="'+esc(restore_link(row['id'],source_version=0,history_page=row['page'],**back))+'">처음 저장한 이름으로 복원</a></p>'
     content+='<p>표시 이름만 변경합니다. 처음 이름과 이전 이름은 이력에 보존하며 검색 조건·문서·변환본·보관 상태·원본·검수 이력·영수증을 변경하지 않습니다.</p>'
     content+='<p>문서: '+esc(row['title'])+' · '+('보관함' if row['state']=='archived' else '사용 중')+' · 이름 기록 #'+str(row['name_version'])+'</p>'
     if row['name_required'] or row['management_required']:
         content+='<p data-warning-name-required>이름 변경에는 명시적 마이그레이션이 필요합니다. 이 화면은 DB를 변경하지 않습니다.</p>'
-    elif svc.require_member(handler.store,p)['role'] in svc.WRITE_ROLES:
+    elif writable:
         content+='<form method="post" action="'+PATH+'/rename" data-warning-name-form>'+handler._csrf_field()
         for k,v in dict(id=row['id'],expected=row['name_version'],expected_state=row['version'],**back).items():content+=_hidden(k,str(v))
         content+='<label>새 표시 이름<input name="name" maxlength="120" required value="'+esc(row['name'])+'"></label>'
@@ -36,7 +40,11 @@ def render(handler,raw,*,status=200,warning=''):
         content+='<button>표시 이름 변경</button></form><p>현재와 다른 이름을 입력하세요. 이전 이름으로 돌아갈 때도 새 기록으로 남습니다.</p>'
     else:content+='<p>현재 계정은 읽기 전용입니다. 이름 변경은 변경 권한이 있는 담당자만 할 수 있습니다.</p>'
     content+='<h2>이름 변경 이력</h2><p>이름 기록 '+str(row['total'])+'개</p><ol data-warning-name-history>'
-    for e in row['events']:content+='<li>#'+str(e['version'])+' · '+esc(e['name'])+' · '+esc(e['created_at'])+'</li>'
+    for e in row['events']:
+        content+='<li data-warning-name-event="'+str(e['version'])+'">#'+str(e['version'])+' · '+esc(e['name'])+' · '+esc(e['created_at'])
+        if writable and e['name']!=row['name']:
+            content+=' · <a data-warning-name-restore-open href="'+esc(restore_link(row['id'],source_version=e['version'],history_page=row['page'],**back))+'">이 이름으로 복원</a>'
+        content+='</li>'
     content+='</ol><nav aria-label="경고 검색 조건 이름 이력 페이지">'+str(row['page'])+' / '+str(row['pages'])+'페이지'
     for n,label in ((row['page']-1,'이전 이름 이력'),(row['page']+1,'다음 이름 이력')):
         if 1<=n<=row['pages']:content+=' · <a href="'+esc(link(row['id'],page=n,**back))+'">'+label+'</a>'

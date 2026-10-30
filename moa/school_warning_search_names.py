@@ -58,14 +58,37 @@ def get(store,principal,ident,*,page=1):
         return dict(row,events=events,total=total,page=page,pages=pages)
 
 
-def rename(store,principal,ident,*,name,expected,expected_state):
-    key(ident);name=unicodedata.normalize('NFC',text(name,120,required=True))
+def _source(store,principal,row,source_version):
+    if row['name_required'] or row['management_required']:
+        raise review.Conflict('Explicit name migration required')
+    if source_version==0:return dict(name=row['original_name'],created_at=row['created_at'])
+    event=store.db.execute('SELECT name,created_at FROM school_warning_search_names WHERE search_id=?'
+        ' AND school=? AND subject=? AND version=?',
+        (row['id'],principal.school,principal.subject,source_version)).fetchone()
+    if event is None:raise LookupError('Saved warning name not found')
+    return dict(event)
+
+
+def _source_version(value):
+    if type(value) is not int or not 0<=value<=MAX_VERSION:raise ValueError('Invalid warning name source')
+
+
+def selection(store,principal,ident,*,source_version):
+    _source_version(source_version)
+    with _snapshot(store):
+        row=get(store,principal,ident);source=_source(store,principal,row,source_version)
+        return dict(row,source_version=source_version,source_name=source['name'],source_created_at=source['created_at'])
+
+
+def _change(store,principal,ident,*,name,source_version,expected,expected_state):
+    key(ident)
     if any(type(n) is not int or not 0<=n<MAX_VERSION for n in (expected,expected_state)):
         raise ValueError('Invalid warning name version')
     try:
         store.db.execute('BEGIN IMMEDIATE');svc.require_member(store,principal,write=True)
         row=get(store,principal,ident)
         if row['name_required'] or row['management_required']:raise review.Conflict('Explicit name migration required')
+        if source_version is not None:name=_source(store,principal,row,source_version)['name']
         if (expected,expected_state)!=(row['name_version'],row['version']) or name==row['name']:
             raise review.Conflict('Warning name or state changed, or same name')
         store.db.execute('INSERT INTO school_warning_search_names VALUES(?,?,?,?,?,?)',
@@ -73,3 +96,13 @@ def rename(store,principal,ident,*,name,expected,expected_state):
         store.db.commit();return expected+1
     except Exception:
         store.db.rollback();raise
+
+
+def rename(store,principal,ident,*,name,expected,expected_state):
+    name=unicodedata.normalize('NFC',text(name,120,required=True))
+    return _change(store,principal,ident,name=name,source_version=None,expected=expected,expected_state=expected_state)
+
+
+def restore(store,principal,ident,*,source_version,expected,expected_state):
+    _source_version(source_version)
+    return _change(store,principal,ident,name=None,source_version=source_version,expected=expected,expected_state=expected_state)
