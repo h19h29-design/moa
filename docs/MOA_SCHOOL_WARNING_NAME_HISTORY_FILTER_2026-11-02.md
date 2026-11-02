@@ -92,7 +92,7 @@ UUID `961CA3AE-AE5E-4C5C-B78C-84474F4C8DD8`, 실제 마운트 `/Volumes/KIOXIA-2
 ## GitHub 반영
 
 코드·테스트·비밀 없는 문서 **6개만** 기존 `codex/moa-autoqa-v1`과
-[PR #1](https://github.com/h19h29-design/moa/pull/1)에 정상 commit/push했다(커밋 `af7c76b`).
+[PR #1](https://github.com/h19h29-design/moa/pull/1)에 정상 commit/push했다(코드 커밋 `af7c76b`, 이후 문서 정리 커밋 포함).
 PR 설명에 이번 단계의 사용 흐름·검증·남은 플레이크를 추가했다.
 기존 미추적 가상환경·문서 3개는 보존하고 반영에서 제외했다.
 원본·DB·모델·캐시·브라우저 자료·비공개 실행 기록은 Git에 넣지 않았다.
