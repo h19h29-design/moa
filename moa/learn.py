@@ -50,7 +50,9 @@ def extract_asset(store: Store, asset: dict) -> dict:
         try:
             p = subprocess.run([sys.executable, '-m', 'moa.extract', str(store.object_path(sha)), kind],
                 capture_output=True, timeout=55, preexec_fn=_limits,
-                env={k: v for k, v in os.environ.items() if k in ('PATH', 'PYTHONPATH', 'LANG', 'LC_ALL', 'HOME', 'TZ')})
+                env={k: v for k, v in os.environ.items() if k in (
+                    'PATH', 'PYTHONPATH', 'LANG', 'LC_ALL', 'HOME', 'TZ',
+                    'TMPDIR', 'TMP', 'TEMP', 'XDG_CACHE_HOME', 'PYTHONPYCACHEPREFIX')})
             if p.returncode or len(p.stdout) > 30*1024*1024:
                 raise ValueError('문서 분석 작업 실패')
             result = json.loads(p.stdout)

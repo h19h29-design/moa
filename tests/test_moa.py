@@ -554,13 +554,13 @@ def test_dext5_uploader_attachment_is_read_from_script():
 
 def test_status_reports_today_dedup_and_review_state(tmp_path,capsys):
     from moa.app import cli
-    from moa.core import Store
+    from moa.core import Store, kst_now
     from moa.learn import learn
     with Store(tmp_path) as store:
         asset=store.object(b'x','a.pdf')
         ident,_=store.save_notice(school(),'https://example.org/1','안내',
                                   '<table><tr><td>장소</td><td>운동장</td></tr></table>',[asset],
-                                  datetime.now().date().isoformat())
+                                  kst_now().date().isoformat())  # status counts Korean days, even on UTC runners
         learn(store,ident)
     assert cli(['--data',str(tmp_path),'status'])==0
     out=json.loads(capsys.readouterr().out)
@@ -1114,5 +1114,8 @@ def test_hwp_table_cells_and_spans():
     assert t['rows'] == 2 and t['cols'] == 2 and len(t['cells']) == 3
     assert t['cells'][0]['colspan'] == 2 and '제목' in t['cells'][0]['text']
     assert t['cells'][1]['text'].startswith('가항목')
-    assert _hwp_text('\x0bOCR어쩌구\x00\x00\x00\x00\x00\x00\x0b\x00'.encode('utf-16-le')
+    # HWP 5.0 inline/extended controls are 8 WCHARs: marker + 6 + marker.
+    # The old fixture incorrectly added six more NUL WCHARs and rewarded a
+    # variable-length skip that could consume real Korean text.
+    assert _hwp_text('\x0bOCR어쩌구\x0b'.encode('utf-16-le')
                      + '본문'.encode('utf-16-le')) == '본문'

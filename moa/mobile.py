@@ -19,7 +19,7 @@ from .core import Store, digest, encode, kst_now, write_jsonl
 from .extract import LAYOUTS, PARSER_VERSION, detect_kind, html_document, table_pattern
 from .render import CSS, render_mobile, render_page
 
-CONVERTER_VERSION = 'moa-notice-v1'
+CONVERTER_VERSION = 'moa-notice-v7-readable-tables'
 ROLES = ('convert', 'attachment')
 REASONS = {'unconfirmed': '아직 미확인', 'missing': '내용 누락',
            'table': '표 관계 오류', 'readability': '읽기 불편',
@@ -30,6 +30,10 @@ FORM_TITLE = re.compile(r'^(?:[\w가-힣 ·ㆍ·:()\-]{0,70})?(?:희망 신청�
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_FILES = 10
+
+
+class SchoolAccessDenied(LookupError):
+    """Unscoped legacy paths must not reveal the existence of school records."""
 
 
 def default_role(filename: str) -> str:
@@ -55,7 +59,7 @@ def validate_file(data: bytes, filename: str) -> dict:
     return {'filename': filename, 'kind': kind}
 
 
-def create_upload(store: Store, uploads: list[tuple[str, bytes]], title: str = '', attachment_indices=(), evaluation=False) -> str:
+def create_upload(store: Store, uploads: list[tuple[str, bytes]], title: str = '', attachment_indices=(), evaluation=False, *, commit=True) -> str:
     if not 1 <= len(uploads) <= MAX_FILES or sum(len(d) for _,d in uploads) > MAX_UPLOAD_BYTES:
         raise ValueError('최대 10개 파일, 전체 50MB까지 업로드할 수 있습니다.')
     checked = [(validate_file(data, name), data) for name,data in uploads]
@@ -71,7 +75,8 @@ def create_upload(store: Store, uploads: list[tuple[str, bytes]], title: str = '
     now = kst_now().isoformat()
     store.db.execute('INSERT INTO mobile_notices(id,title,files,split,created_at,updated_at) VALUES(?,?,?,?,?,?)',
                      (ident,title,encode(files),'eval' if evaluation else 'train',now,now))
-    store.db.commit()
+    if commit:
+        store.db.commit()
     return ident
 
 
@@ -129,15 +134,51 @@ def register_collected(store: Store, doc: dict) -> str:
     return ident
 
 
-def notice_row(store: Store, ident: str):
+def research_filter(store: Store, alias='n') -> str:
+    """Exclude opt-in school records without requiring/applying their migration."""
+    if not store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_versions'").fetchone():
+        return '1'
+    # alias is an internal SQL identifier, never a request value.
+    if not re.fullmatch(r'[a-z_]+', alias): raise ValueError('Invalid SQL alias')
+    return 'NOT EXISTS (SELECT 1 FROM school_service_versions sv WHERE sv.mobile_id='+alias+'.id)'
+
+
+def school_owned(store: Store, ident: str) -> bool:
+    if not store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_versions'").fetchone(): return False
+    return bool(store.db.execute('SELECT 1 FROM school_service_versions WHERE mobile_id=?', (ident,)).fetchone())
+
+
+def school_object(store: Store, sha: str) -> bool:
+    """Block school-only SHA URLs; preserve independent research references.
+
+    Sharing immutable bytes does not transfer the school notice's metadata or
+    access rights. A research reader may still download an already-authorized
+    research original with the same SHA through the existing review UI.
+    """
+    if not store.db.execute("SELECT 1 FROM sqlite_master WHERE name='school_service_versions'").fetchone(): return False
+    protected = store.db.execute('SELECT 1 FROM school_service_versions v JOIN mobile_notices n ON n.id=v.mobile_id'
+        ' WHERE EXISTS (SELECT 1 FROM json_each(n.files) f WHERE json_extract(f.value,\'$.sha256\')=?)'
+        ' OR EXISTS (SELECT 1 FROM mobile_revisions r WHERE r.notice_id=n.id AND r.html_sha=?) LIMIT 1', (sha, sha)).fetchone()
+    if not protected: return False
+    independent = store.db.execute('SELECT 1 FROM mobile_notices n WHERE '+research_filter(store)+
+        ' AND (EXISTS (SELECT 1 FROM json_each(n.files) f WHERE json_extract(f.value,\'$.sha256\')=?)'
+        ' OR EXISTS (SELECT 1 FROM mobile_revisions r WHERE r.notice_id=n.id AND r.html_sha=?)) LIMIT 1', (sha, sha)).fetchone()
+    if not independent:
+        independent = store.db.execute("SELECT 1 FROM notices n WHERE json_extract(n.payload,'$.source_page.sha256')=?"
+            " OR EXISTS (SELECT 1 FROM json_each(n.payload,'$.assets') f WHERE json_extract(f.value,'$.sha256')=?) LIMIT 1", (sha, sha)).fetchone()
+    return not bool(independent)
+
+
+def notice_row(store: Store, ident: str, *, school=False):
+    if not school and school_owned(store, ident): raise SchoolAccessDenied('Notice not found')
     row = store.db.execute('SELECT * FROM mobile_notices WHERE id=?', (ident,)).fetchone()
     if not row:
         raise ValueError('안내문을 찾을 수 없습니다.')
     return row
 
 
-def revision(store: Store, ident: str, revision_id: str = '') -> dict | None:
-    row = notice_row(store,ident)
+def revision(store: Store, ident: str, revision_id: str = '', *, school=False) -> dict | None:
+    row = notice_row(store,ident,school=school)
     rid = revision_id or row['latest_revision']
     found = store.db.execute('SELECT * FROM mobile_revisions WHERE id=? AND notice_id=?', (rid,ident)).fetchone()
     return {**dict(found), 'data':json.loads(found['payload'])} if found else None
@@ -169,6 +210,45 @@ def _decorative(text: str) -> bool:
         bool(re.fullmatch(r'([가-힣]{2,30}학교)(?:\1|[·ㆍ])*', compact) and compact.count('학교') >= 5)
 
 
+def explicit_blank_form(table: dict) -> bool:
+    """Machine role evidence, never human approval or a completed privacy audit."""
+    cells = table.get('cells', [])
+    top = [re.sub(r'\s+', '', c['text']) for c in cells if c['row'] == 0]
+    if not any(re.fullmatch(r'[\w가-힣·ㆍ()\-]{0,70}(?:신청서|동의서)', text) for text in top):
+        return False
+    text = re.sub(r'\s+', '', ' '.join(c['text'] for c in cells))
+    fields = sum(label in text for label in ('성명', '보호자', '연락처', '서명', '생년월일', '계좌번호', '신청자명'))
+    return fields >= 2 and sum(not c['text'].strip() for c in cells) >= 2
+
+
+def form_instruction(block: dict) -> bool:
+    """Keep explicit submission directions even when printed below a form title.
+
+    Filled fields and consent boilerplate stay in the original attachment. This
+    does not confirm an ambiguous form boundary or authorize human approval.
+    """
+    if block['type'] != 'paragraph':
+        return False
+    text = block.get('text', '')
+    return bool(re.search(r'(?:제출|회신)', text) and
+                re.search(r'(?:기한|마감|까지|제출\s*(?:장소|방법|처)|회신\s*방법)', text))
+
+
+def masthead_layout(table: dict) -> bool:
+    """Explicit school banner + full-width prose, not dimensions-only guessing."""
+    if table.get('geometry_uncertain') or table.get('nested') or table.get('cols', 0) < 2:
+        return False
+    cells = table.get('cells', [])
+    banner = [c for c in cells if c['row'] < 2 and re.sub(r'\s+', '', c.get('text','')) == '가정통신문']
+    if not banner:
+        return False
+    end = max(c['row'] + c.get('rowspan', 1) for c in cells if c['row'] <= banner[0]['row'])
+    body = [c for c in cells if c['row'] >= end and c.get('text','').strip()]
+    return bool(body) and all(c['col'] == 0 and c.get('colspan',1) == table['cols'] for c in body) and any(
+        len(c['text']) >= 200 and len(c.get('blocks', [])) >= 2 and
+        all(b['type'] == 'paragraph' for b in c['blocks']) for c in body)
+
+
 def ordered_blocks(result: dict) -> tuple[list, list]:
     """Reflow layout cells but keep real data tables and source pointers."""
     tables = result.get('tables', [])
@@ -190,9 +270,9 @@ def ordered_blocks(result: dict) -> tuple[list, list]:
                 table = tables[i]
                 cells = table.get('cells', [])
                 empty = sum(not c.get('text','').strip() for c in cells)
-                layout = table.get('nested') or table.get('cols') == 1 or \
+                layout = masthead_layout(table) or table.get('nested') or table.get('cols') == 1 or \
                     (cells and empty > len(cells)/3) or table.get('rows') == 1
-                if layout:
+                if layout and not explicit_blank_form(table):
                     for cell in sorted(cells,key=lambda c:(c['row'],c['col'])):
                         blocks = cell.get('blocks') or [{'type':'paragraph','text':cell.get('text','')}]
                         out.extend(flatten(blocks, (*ancestors,i)))
@@ -243,7 +323,8 @@ def repeated_columns(table: dict) -> tuple[dict, str]:
     labels = [by_row[header_row][c]['text'] for c in range(3)]
     cells = [{'row':r,'col':c,'rowspan':1,'colspan':1,'text':text,'header':r==0}
              for r,row in enumerate([labels,*data]) for c,text in enumerate(row)]
-    caption = '\n'.join(c['text'] for c in table['cells'] if c['row'] < header_row and c['text'])
+    caption = '\n'.join(filter(None, [table.get('caption', ''),
+        '\n'.join(c['text'] for c in table['cells'] if c['row'] < header_row and c['text'])]))
     return {'rows':len(data)+1,'cols':3,'cells':cells,'source':table.get('source'),
             'caption':caption,'geometry_uncertain':False}, 'repeated-columns-v1'
 
@@ -269,7 +350,7 @@ def approved_rules(store: Store) -> dict:
     from .corpus import mobile_allowed
     rows = store.db.execute("SELECT n.id,n.origin_notice_id,n.approved_revision,r.payload FROM mobile_notices n"
                             " JOIN mobile_revisions r ON r.id=n.approved_revision"
-                            " WHERE n.state='approved' AND n.latest_revision=n.approved_revision AND n.split!='eval'")
+                            " WHERE n.state='approved' AND n.latest_revision=n.approved_revision AND n.split!='eval' AND "+research_filter(store))
     rules = {}
     for row in rows:
         if not mobile_allowed(store,row):continue
@@ -286,12 +367,13 @@ def approved_rules(store: Store) -> dict:
     return rules
 
 
-def build_conversion(store: Store, ident: str, edits: dict | None = None, title: str = '') -> dict:
+def build_conversion(store: Store, ident: str, edits: dict | None = None, title: str = '', *, use_approved_rules=True, school=False) -> dict:
     from .learn import extract_asset
-    row = notice_row(store,ident)
+    row = notice_row(store,ident,school=school)
+    if school and use_approved_rules: raise ValueError('School conversion cannot use research approvals')
     files = file_roles(json.loads(row['files']), edits) if edits is not None else json.loads(row['files'])
-    blocks, warnings, excluded, audit, source_results = [], [], [], [], []
-    rules = approved_rules(store)
+    blocks, warnings, excluded, audit, source_results, boundaries = [], [], [], [], [], []
+    rules = approved_rules(store) if use_approved_rules else {}
     for file in files:
         if file['role'] == 'attachment': continue
         result = extract_asset(store,file)
@@ -323,7 +405,8 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
                 text = b.get('text','')
                 if b['type'] == 'table':
                     text = ' '.join(c['text'] for c in b['table'].get('cells',[]))
-                    form = sum(word in text for word in ('지원자','성명','보호자','서명','신청자')) >= 3
+                    form = explicit_blank_form(b['table']) or \
+                        sum(word in text for word in ('지원자','성명','보호자','서명','신청자')) >= 3
                 else:
                     form = bool(FORM_TITLE.fullmatch(text.strip()))
                 if form:
@@ -331,12 +414,19 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
                     break
         if file.get('scope') == 'mixed' and form_at is None:
             warnings.append({'code':'boundary','file_id':file['id'],'message':'혼합 문서의 서식 시작 구역을 지정하세요.'})
-        if form_at is not None and not file.get('boundary_confirmed'):
+        machine_boundary = form_at is not None and content[form_at]['type'] == 'table' and \
+            explicit_blank_form(content[form_at]['table'])
+        if machine_boundary:
+            boundaries.append({'method':'explicit_blank_form_v1','file_id':file['id'],
+                               'source_block':form_at,'original_sha256':file['sha256'],
+                               'table_sha256':digest(encode(content[form_at]['table']).encode()),
+                               'human_confirmed':False})
+        if form_at is not None and not file.get('boundary_confirmed') and not machine_boundary:
             warnings.append({'code':'boundary','file_id':file['id'],
                              'message':f'안내/서식 경계 후보는 구역 {form_at}입니다. 원문 대조 후 경계를 확인하세요.'})
         for i,b in enumerate(content):
             b.update(id=f"{file['id']}:{i}",file_id=file['id'],source_block=i)
-            if form_at is not None and i >= form_at:
+            if form_at is not None and i >= form_at and not form_instruction(b):
                 excluded.append({'reason':'form','file_id':file['id'],'source_block':i,'block':b})
                 continue
             if b['type'] == 'table':
@@ -360,7 +450,7 @@ def build_conversion(store: Store, ident: str, edits: dict | None = None, title:
         warnings.append({'code':'empty','message':'읽을 수 있는 안내 내용이 없습니다.'})
     return {'title':title.strip()[:300] or row['title'], 'files':files, 'blocks':blocks,
             'warnings':warnings, 'excluded':excluded, 'sources':source_results,
-            'recommendations':audit, 'parser_version':PARSER_VERSION,
+            'recommendations':audit, 'boundary_evidence':boundaries, 'parser_version':PARSER_VERSION,
             'converter_version':CONVERTER_VERSION, 'human_corrected':False}
 
 
@@ -408,33 +498,44 @@ def render_notice(data: dict, file_url=None, candidate=True) -> str:
         parts.append('<p class="moa-warning">'+html.escape(w['message'])+'</p>')
     parts.append('<article class="moa-notice">')
     metadata = []
+    title_block = ''
+    def annotated(block, content):
+        return '<div class="moa-source-block" data-moa-block="%s" data-moa-type="%s">%s</div>' % (
+            html.escape(block['id'], quote=True), block['type'], content)
     for b in data.get('blocks',[]):
         if b['type'] == 'paragraph':
             text = b['text']
             if b.get('placement')=='source_info':
-                metadata.append(text)
+                metadata.append((b, text))
                 continue
-            if b.get('placement')=='title' and text==data['title']: continue
+            if b.get('placement')=='title' and text==data['title']:
+                title_block = b['id']
+                continue
             heading = text.startswith('[') and text.rstrip().endswith(']') or \
                 bool(re.fullmatch(r'[가-하][.．]\s*.{1,25}',text))
             tag = 'h2' if heading else 'p'
-            parts.append(f'<{tag} class="moa-paragraph">{html.escape(text)}</{tag}>')
+            parts.append(annotated(b, f'<{tag} class="moa-paragraph">{html.escape(text)}</{tag}>'))
         elif b['type'] == 'table':
+            fragment = ''
             if b['table'].get('caption'):
-                parts.append('<h2>'+html.escape(b['table']['caption'])+'</h2>')
-            parts.append(render_mobile(b['table'],b['layout']))
+                fragment += '<h2 class="moa-block-caption">'+html.escape(b['table']['caption'])+'</h2>'
+            fragment += render_mobile(b['table'],b['layout'])
             if b.get('note'):
-                parts.append('<p class="moa-paragraph">'+html.escape(b['note'])+'</p>')
+                fragment += '<p class="moa-paragraph moa-block-note">'+html.escape(b['note'])+'</p>'
+            parts.append(annotated(b, fragment))
     if metadata:
         parts.append('<section><h2>발신 정보·문의처 (원문 표기)</h2>'+''.join(
-            '<p class="moa-paragraph">'+html.escape(t)+'</p>' for t in metadata)+'</section>')
+            annotated(b, '<p class="moa-paragraph">'+html.escape(t)+'</p>') for b,t in metadata)+'</section>')
     parts.append('</article><section class="moa-attachments"><h2>원본 및 함께 첨부한 파일</h2><ul>')
     for file in data['files']:
         role = '원본 첨부 유지' if file['role'] == 'attachment' else '안내 원본 / 작성용 서식 포함 시 원본 사용'
         parts.append('<li><a href="%s">%s</a><span> · %s</span></li>' %
                      (html.escape(file_url(file),quote=True),html.escape(file['filename']),role))
     parts.append('</ul></section>')
-    return render_page(data['title'], ''.join(parts)).replace('</style>',
+    page = render_page(data['title'], ''.join(parts))
+    if title_block:
+        page = page.replace('<h3>', '<h3 data-moa-type="paragraph" data-moa-block="'+html.escape(title_block, quote=True)+'">', 1)
+    return page.replace('</style>',
         '.moa-notice,.moa-attachments{max-width:720px;margin:auto;background:white;padding:18px;border-radius:12px}'
         '.moa-paragraph{white-space:pre-wrap;line-height:1.8;overflow-wrap:anywhere}'
         'h2{font-size:18px;line-height:1.6}h3{max-width:720px;margin:16px auto;font-size:22px}'
@@ -443,8 +544,9 @@ def render_notice(data: dict, file_url=None, candidate=True) -> str:
         '.moa-attachments span{font-size:12px;color:#667}</style>')
 
 
-def save_revision(store: Store, ident: str, data: dict) -> dict:
-    row = notice_row(store,ident)
+def save_revision(store: Store, ident: str, data: dict, *, export_rules=True, school=False, commit=True) -> dict:
+    row = notice_row(store,ident,school=school)
+    if school and export_rules: raise ValueError('School conversion cannot export research rules')
     data = copy.deepcopy(data)
     data['notice_id'] = ident
     fingerprint = digest(encode(data).encode())
@@ -458,9 +560,11 @@ def save_revision(store: Store, ident: str, data: dict) -> dict:
     store.db.execute("UPDATE mobile_notices SET title=?,files=?,latest_revision=?,approved_revision=NULL,"
                      " state='candidate',updated_at=? WHERE id=?",
                      (data['title'],encode(data['files']),rid,now,ident))
-    store.db.commit()
-    export_mobile(store)
-    return revision(store,ident)
+    if commit:
+        store.db.commit()
+    if export_rules:
+        export_mobile(store)
+    return revision(store,ident,school=school)
 
 
 def generate(store: Store, ident: str, edits=None, title='') -> dict:
@@ -532,7 +636,7 @@ def queue_conversion(store: Store, ident: str, rid: str, edits: dict, title: str
 def queue_outdated(store: Store) -> int:
     """An upgraded parser produces a fresh candidate; human versions stay archived."""
     rows = store.db.execute("SELECT n.id,n.title,n.files,n.latest_revision,r.payload FROM mobile_notices n"
-                            " JOIN mobile_revisions r ON r.id=n.latest_revision WHERE n.state!='processing'").fetchall()
+                            " JOIN mobile_revisions r ON r.id=n.latest_revision WHERE n.state!='processing' AND "+research_filter(store)).fetchall()
     count = 0
     for row in rows:
         data = json.loads(row['payload'])
@@ -562,16 +666,17 @@ def drain_mobile(store: Store, limit=1):
         except Exception as exc:
             # Failure is observable, no exception text or document content in logs.
             store.fail_job(job['id'],type(exc).__name__,max_attempts=1)
-            store.db.execute("UPDATE mobile_notices SET state=? WHERE id=?",
-                              ('candidate' if row and row['latest_revision'] else 'files_ready',job['ref_id']))
+            if not school_owned(store, job['ref_id']):
+                store.db.execute("UPDATE mobile_notices SET state=? WHERE id=?",
+                                  ('candidate' if row and row['latest_revision'] else 'files_ready',job['ref_id']))
             store.db.commit()
             outcomes.append('error')
     return outcomes
 
 
-def bundle(store: Store, ident: str) -> bytes:
-    row = notice_row(store,ident)
-    rev = revision(store,ident)
+def bundle(store: Store, ident: str, *, school=False) -> bytes:
+    row = notice_row(store,ident,school=school)
+    rev = revision(store,ident,school=school)
     if not rev: raise ValueError('먼저 모바일 HTML을 생성하세요.')
     data = rev['data']
     paths, written = {}, set()
