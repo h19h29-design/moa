@@ -2,8 +2,7 @@
 import re
 from urllib.parse import urlencode
 from . import school_warning_search_names as names, school_service as svc, school_review as review
-from .school_warning_search_names_web import PATH, link as history_link
-from .school_warning_search_management_web import context
+from .school_warning_search_names_web import PATH, context, link as history_link
 from .school_saved_queue_web import query, number
 from .school_review_web import _hidden
 from .school_compare_web import STYLE
@@ -12,13 +11,14 @@ from .web import esc
 ROUTE=PATH+'/name-restore'
 
 
-def link(ident,*,source_version,history_page=1,q='',state='active',list_page=1):
-    return ROUTE+'?'+urlencode(dict(id=ident,source_version=source_version,history_page=history_page,
-        q=q,state=state,list_page=list_page))
+def link(ident,*,source_version,history_page=1,q='',state='active',list_page=1,hq='',hf='',ht=''):
+    fields=dict(id=ident,source_version=source_version,history_page=history_page,q=q,state=state,list_page=list_page)
+    fields.update({k:v for k,v in dict(hq=hq,hf=hf,ht=ht).items() if v})
+    return ROUTE+'?'+urlencode(fields)
 
 
 def render(handler,raw,*,status=200,warning=''):
-    values=query(raw,{'id','source_version','history_page','q','state','list_page'})
+    values=query(raw,{'id','source_version','history_page','q','state','list_page','hq','hf','ht'})
     if not {'id','source_version'}<=set(values):raise ValueError('Select a saved warning name')
     if not re.fullmatch(r'0|[1-9][0-9]{0,9}',values['source_version'][0]):raise ValueError('Invalid name source')
     source=int(values['source_version'][0]);back=context(values)
@@ -47,7 +47,7 @@ def render(handler,raw,*,status=200,warning=''):
 
 def dispatch(handler,*,raw=None,form=None):
     if form is None:return render(handler,raw)
-    fields={'csrf','id','source_version','expected','expected_state','history_page','acknowledge','q','state','list_page'}
+    fields={'csrf','id','source_version','expected','expected_state','history_page','acknowledge','q','state','list_page','hq','hf','ht'}
     if (set(form)!=fields or any(len(v)!=1 for v in form.values()) or form['acknowledge'][0]!='yes'
             or any(not re.fullmatch(r'0|[1-9][0-9]{0,9}',form[k][0]) for k in ('source_version','expected','expected_state'))):
         raise ValueError('Explicit warning name restore required')

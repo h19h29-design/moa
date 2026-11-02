@@ -1,4 +1,6 @@
 """Append-only display names; frozen warning conditions remain untouched."""
+import datetime
+import re
 import unicodedata
 from . import school_service as svc, school_review as review
 from .school_confirmed_export import _snapshot
@@ -26,10 +28,32 @@ CREATE TRIGGER school_warning_search_names_no_delete BEFORE DELETE ON school_war
 '''
 MAX_VERSION=2147483647
 PAGE_SIZE=20
+MAX_QUERY=120
 
 
 def available(store):
     return bool(store.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='school_warning_search_names'").fetchone())
+
+
+def _fold(value):
+    return unicodedata.normalize('NFC',value.casefold())
+
+
+def _day(value):
+    if not isinstance(value,str) or len(value)>10:raise ValueError('Invalid warning name date range')
+    if not value:return ''
+    if not re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}',value):raise ValueError('Invalid warning name date range')
+    try:datetime.date(int(value[0:4],10),int(value[5:7],10),int(value[8:10],10))
+    except ValueError:raise ValueError('Invalid warning name date range')
+    return value
+
+
+def filters(*,q='',start='',end=''):
+    """Validate read-only history filters; nothing is written or re-evaluated."""
+    selected=dict(q=unicodedata.normalize('NFC',text(q,MAX_QUERY)),start=_day(start),end=_day(end))
+    if selected['start'] and selected['end'] and selected['start']>selected['end']:
+        raise ValueError('Invalid warning name date range')
+    return selected
 
 
 def decorate(store,row,*,installed=None):
@@ -44,18 +68,31 @@ def decorate(store,row,*,installed=None):
     return result
 
 
-def get(store,principal,ident,*,page=1):
+def get(store,principal,ident,*,page=1,q='',start='',end=''):
     from . import school_warning_search_management as management
     management._page(page)
+    selected=filters(q=q,start=start,end=end)
     with _snapshot(store):
         row=management._metadata(store,principal,ident);params=(ident,principal.school,principal.subject)
-        total=0 if row['name_required'] else store.db.execute('SELECT count(*) FROM school_warning_search_names'
+        if row['name_required']:
+            return dict(row,events=[],total=0,all_total=0,page=1,pages=1,history=selected)
+        all_total=store.db.execute('SELECT count(*) FROM school_warning_search_names'
             ' WHERE search_id=? AND school=? AND subject=?',params).fetchone()[0]
+        clauses=[];arguments=list(params)
+        if selected['q']:
+            # Connection-local pure scalar function: no schema or cached result writes.
+            store.db.create_function('moa_warning_name_key',1,_fold,deterministic=True)
+            clauses.append('instr(moa_warning_name_key(name),?)>0');arguments.append(_fold(selected['q']))
+        if selected['start']:clauses.append('substr(created_at,1,10)>=?');arguments.append(selected['start'])
+        if selected['end']:clauses.append('substr(created_at,1,10)<=?');arguments.append(selected['end'])
+        where=(' AND '+' AND '.join(clauses)) if clauses else ''
+        total=store.db.execute('SELECT count(*) FROM school_warning_search_names'
+            ' WHERE search_id=? AND school=? AND subject=?'+where,arguments).fetchone()[0]
         pages=max(1,(total+PAGE_SIZE-1)//PAGE_SIZE);page=min(page,pages)
         events=[] if row['name_required'] else [dict(r) for r in store.db.execute(
-            'SELECT version,name,created_at FROM school_warning_search_names WHERE search_id=? AND school=? AND subject=?'
-            ' ORDER BY version DESC LIMIT ? OFFSET ?',(*params,PAGE_SIZE,(page-1)*PAGE_SIZE))]
-        return dict(row,events=events,total=total,page=page,pages=pages)
+            'SELECT version,name,created_at FROM school_warning_search_names WHERE search_id=? AND school=? AND subject=?'+where+
+            ' ORDER BY version DESC LIMIT ? OFFSET ?',(*arguments,PAGE_SIZE,(page-1)*PAGE_SIZE))]
+        return dict(row,events=events,total=total,all_total=all_total,page=page,pages=pages,history=selected)
 
 
 def _source(store,principal,row,source_version):
